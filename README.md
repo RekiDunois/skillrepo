@@ -117,7 +117,7 @@ skillrepo migration ignore --plan ./migration-plan.json --target-root ~/skill-re
 
 Ignore generation uses an explicit safe-pattern allowlist for runtime/cache noise. It never automatically hides credential/privacy blockers such as `.env`, key material, or session state merely because the audit found them.
 
-For v0, skillrepo **never auto-rewrites an existing `.gitignore`**, including symlinks. Repositories with an existing file and remaining safe suggestions are reported as manual review. If no `.gitignore` exists, `--execute` may create a new file containing only the narrow safe allowlist; every observed candidate path is then re-probed with the selected Git executable. Verification failure is an error and is never reported as a successful fix.
+For v0, skillrepo **never auto-rewrites an existing `.gitignore`**, including symlinks. Repositories with an existing file and remaining safe suggestions are reported as manual review. If no `.gitignore` exists, `--execute` stages the complete generated content in a private same-directory file and publishes it with a no-clobber operation only after staging write/sync/close succeeds, so a partial final file is never exposed and a `.gitignore` that appears concurrently is never overwritten. Every observed candidate path is then re-probed with the selected Git executable. Verification failure is an error and is never reported as a successful fix; the published generated `.gitignore` is deliberately left in place for manual review because skillrepo never performs a racy pathname rollback/delete after publication.
 
 ### Portability review
 
@@ -157,4 +157,4 @@ npm install
 npm test
 ```
 
-GitHub Actions additionally installs the packaged `skillrepo` CLI and the real OpenCode CLI, registers fixture repositories, verifies discovery, and exercises migration, resume, audit, and ignore flows end-to-end.
+GitHub Actions runs the unit suite on both Ubuntu and Windows. The Ubuntu job additionally installs the packaged `skillrepo` CLI and the real OpenCode CLI, registers fixture repositories, verifies discovery, and exercises migration, resume, audit, and ignore flows end-to-end.
