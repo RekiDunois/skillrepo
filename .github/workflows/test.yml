@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [main, bootstrap]
+    branches: [main]
   pull_request:
 
 jobs:
@@ -15,8 +15,13 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npm test
-      - name: Verify packaged CLI entrypoint
-        run: node -e "const fs=require('node:fs'); const p=require('./package.json'); if (!fs.existsSync(p.bin.skillrepo)) { console.error('Missing CLI bin target:', p.bin.skillrepo); process.exit(1); }"
+      - name: Install packaged skillrepo
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(npm pack --silent)"
+          npm install -g "./$package"
+          command -v skillrepo
       - name: Install OpenCode
         run: npm install -g opencode-ai
       - name: Build fixture repo
@@ -40,27 +45,65 @@ jobs:
           ---
           Test fixture.
           EOF
-      - name: Register fixture with normal post-check
-        shell: bash
-        env:
-          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
-        run: node dist/src/cli.js register "$RUNNER_TEMP/fixture-repo"
-      - name: Verify agent discovery through OpenCode
-        shell: bash
-        env:
-          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
-        run: opencode agent list | grep -F 'fixture-worker'
-      - name: Probe skill discovery through OpenCode
+      - name: Register fixture with repo-specific post-check
         shell: bash
         env:
           OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
         run: |
           set -euo pipefail
-          opencode debug skill | grep -F 'fixture-skill'
-      - name: Verify unregister
+          skillrepo register "$RUNNER_TEMP/fixture-repo"
+          skillrepo register "$RUNNER_TEMP/fixture-repo"
+          skillrepo doctor
+      - name: Verify initial discovery through OpenCode
         shell: bash
         env:
           OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
         run: |
-          node dist/src/cli.js unregister "$RUNNER_TEMP/fixture-repo"
+          set -euo pipefail
+          opencode agent list | grep -F 'fixture-worker'
+          opencode debug skill | grep -F 'fixture-skill'
+      - name: Verify new components require no re-register
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/fixture-repo"
+          mkdir -p "$repo/skills/dynamic-skill"
+          cat > "$repo/skills/dynamic-skill/SKILL.md" <<'EOF'
+          ---
+          name: dynamic-skill
+          description: dynamic CI fixture skill
+          ---
+          Dynamic fixture.
+          EOF
+          cat > "$repo/agents/dynamic-worker.md" <<'EOF'
+          ---
+          name: dynamic-worker
+          description: dynamic CI fixture agent
+          mode: subagent
+          ---
+          Dynamic fixture.
+          EOF
+          opencode debug skill | grep -F 'dynamic-skill'
+          opencode agent list | grep -F 'dynamic-worker'
+      - name: Verify removed components disappear without re-register
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/fixture-repo"
+          rm -rf "$repo/skills/dynamic-skill"
+          rm "$repo/agents/dynamic-worker.md"
+          ! opencode debug skill | grep -F 'dynamic-skill'
+          ! opencode agent list | grep -F 'dynamic-worker'
+      - name: Verify unregister through packaged CLI
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: |
+          set -euo pipefail
+          skillrepo unregister "$RUNNER_TEMP/fixture-repo"
+          ! opencode debug skill | grep -F 'fixture-skill'
           ! opencode agent list | grep -F 'fixture-worker'
