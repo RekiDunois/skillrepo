@@ -14,9 +14,10 @@ import {
 import { auditMigrationRepos, renderMigrationAudit } from './audit.js';
 import { applyMigrationIgnores, renderMigrationIgnore } from './ignore.js';
 import { applyMigration } from './migration.js';
+import { classifyMigrationPortability, renderMigrationPortability } from './portability.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--json]`);
   process.exit(2);
 }
 
@@ -122,6 +123,27 @@ async function main(): Promise<void> {
         dryRun: !values.execute,
       });
       console.log(renderMigrationIgnore(result));
+      return;
+    }
+
+    if (subcommand === 'portability') {
+      const { values, positionals } = parseArgs({
+        args: migrationArgs,
+        allowPositionals: true,
+        allowNegative: true,
+        options: {
+          plan: { type: 'string', default: 'migration-plan.json' },
+          'target-root': { type: 'string' },
+          json: { type: 'boolean', default: false },
+        },
+      });
+      if (positionals.length || !values['target-root']) usage();
+
+      const result = await classifyMigrationPortability({
+        planPath: values.plan!,
+        targetRoot: values['target-root'],
+      });
+      console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationPortability(result));
       return;
     }
 
