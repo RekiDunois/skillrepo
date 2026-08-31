@@ -488,14 +488,18 @@ export async function verifyOpenCode(): Promise<VerifyResult[]> {
   ]);
 }
 
-async function doctorStaticIssues(): Promise<string[]> {
+async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: string[] }> {
   const issues: string[] = [];
+  const configuredSkillIds = new Set<string>();
   let configPath: string;
 
   try {
     configPath = opencodeConfigFile();
   } catch (error) {
-    return [error instanceof Error ? error.message : String(error)];
+    return {
+      issues: [error instanceof Error ? error.message : String(error)],
+      skillIds: [],
+    };
   }
 
   try {
@@ -511,6 +515,7 @@ async function doctorStaticIssues(): Promise<string[]> {
       }
 
       for (const id of await collectSkillIds(resolved, false)) {
+        configuredSkillIds.add(id);
         const previous = seenSkills.get(id);
         if (previous && previous !== source) issues.push(`Duplicate skill ID '${id}': ${previous} and ${source}`);
         else seenSkills.set(id, source);
@@ -560,16 +565,23 @@ async function doctorStaticIssues(): Promise<string[]> {
     }
   }
 
-  return issues;
+  return { issues, skillIds: [...configuredSkillIds] };
 }
 
 export async function doctor(): Promise<{ ok: boolean; issues: string[]; verification: VerifyResult[] }> {
-  const issues = await doctorStaticIssues();
+  const staticChecks = await doctorStaticChecks();
+  const issues = staticChecks.issues;
   const verification = await verifyOpenCode();
   for (const result of verification) {
     if (!result.ok) {
       issues.push(`OpenCode verification failed: ${result.command}: ${result.stderr.trim() || 'non-zero exit'}`);
     }
+  }
+
+  const skillProbe = verification.find(result => result.command === 'opencode debug skill');
+  if (skillProbe?.ok) {
+    const missing = staticChecks.skillIds.filter(id => !containsIdentifier(skillProbe.stdout, id));
+    if (missing.length) issues.push(`OpenCode discovery missing configured skill IDs: ${missing.join(', ')}`);
   }
   return { ok: issues.length === 0, issues, verification };
 }
