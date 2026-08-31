@@ -11,11 +11,12 @@ import {
   verifyRepoUnregistered,
   type VerifyResult,
 } from './core.js';
-import { auditMigrationRepos, renderMigrationAudit } from './audit.js';
+import { renderMigrationAudit } from './audit.js';
 import { applyMigrationIgnores, renderMigrationIgnore } from './ignore.js';
 import { applyMigration } from './migration.js';
 import { classifyMigrationPortability, renderMigrationPortability } from './portability.js';
 import { applyMigrationPortabilityFixes, renderMigrationPortabilityFix } from './portability_fix.js';
+import { auditMigrationCommitReadiness } from './readiness.js';
 import { execRegisteredResource, installedSkillrepoSupportsExec } from './runtime.js';
 
 function usage(): never {
@@ -106,7 +107,7 @@ async function main(): Promise<void> {
       });
       if (positionals.length || !values['target-root']) usage();
 
-      const result = await auditMigrationRepos({
+      const result = await auditMigrationCommitReadiness({
         planPath: values.plan!,
         targetRoot: values['target-root'],
       });
