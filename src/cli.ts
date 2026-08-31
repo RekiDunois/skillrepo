@@ -20,7 +20,7 @@ import { auditMigrationCommitReadiness } from './readiness.js';
 import { execRegisteredResource, installedSkillrepoSupportsExec } from './runtime.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--execute] [--json]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
   process.exit(2);
 }
 
@@ -151,6 +151,7 @@ async function main(): Promise<void> {
           options: {
             plan: { type: 'string', default: 'migration-plan.json' },
             'target-root': { type: 'string' },
+            git: { type: 'string', default: 'git' },
             execute: { type: 'boolean', default: false },
             json: { type: 'boolean', default: false },
           },
@@ -160,6 +161,7 @@ async function main(): Promise<void> {
         const preview = await applyMigrationPortabilityFixes({
           planPath: values.plan!,
           targetRoot: values['target-root'],
+          gitPath: values.git!,
           dryRun: true,
         });
         let result = preview;
@@ -174,6 +176,7 @@ async function main(): Promise<void> {
           result = await applyMigrationPortabilityFixes({
             planPath: values.plan!,
             targetRoot: values['target-root'],
+            gitPath: values.git!,
             dryRun: false,
           });
         }
@@ -188,6 +191,7 @@ async function main(): Promise<void> {
         options: {
           plan: { type: 'string', default: 'migration-plan.json' },
           'target-root': { type: 'string' },
+          git: { type: 'string', default: 'git' },
           json: { type: 'boolean', default: false },
         },
       });
@@ -196,6 +200,7 @@ async function main(): Promise<void> {
       const result = await classifyMigrationPortability({
         planPath: values.plan!,
         targetRoot: values['target-root'],
+        gitPath: values.git!,
       });
       console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationPortability(result));
       return;
