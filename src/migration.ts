@@ -142,6 +142,7 @@ type MigrationJournal = {
   repositories: string[];
   operations: JournalOperation[];
   createdDirectories: CreatedDirectory[];
+  creatingDirectories?: string[];
   prospectiveConfigText: string;
   prospectiveConfigFingerprint: string;
   configDirectoryExisted: boolean;
@@ -723,12 +724,20 @@ function journalDirectory(sourceRoot: string): string {
   return join(sourceRoot, JOURNAL_DIRECTORY);
 }
 
+function stagingParent(sourceRoot: string): string {
+  return join(sourceRoot, STAGING_DIRECTORY);
+}
+
 function lockPath(sourceRoot: string): string {
   return join(sourceRoot, LOCK_DIRECTORY);
 }
 
 function makeStagePath(stagingRoot: string, operationId: string): string {
   return join(stagingRoot, operationId);
+}
+
+function stagingTemporaryPath(journal: MigrationJournal): string {
+  return join(stagingParent(journal.sourceRoot), `.${journal.transactionId}.tmp`);
 }
 
 function now(): string {
@@ -760,33 +769,35 @@ async function readJson(path: string): Promise<Record<string, unknown>> {
 
 async function acquireLock(sourceRoot: string, transactionId: string): Promise<void> {
   const path = lockPath(sourceRoot);
+  const temporary = join(journalDirectory(sourceRoot), `.${transactionId}.lock.tmp`);
   try {
-    await mkdir(path, { mode: 0o700 });
+    // A crash before the atomic publish can leave only this transaction's
+    // private staging directory behind. It is safe to rebuild it from the
+    // durable journal on the next resume.
+    await rm(temporary, { recursive: true, force: true });
+    await mkdir(temporary, { mode: 0o700 });
+    await writeFile(
+      join(temporary, 'owner.json'),
+      `${JSON.stringify({ transactionId, sourceRoot, pid: process.pid, createdAt: now() }, null, 2)}\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+    await rename(temporary, path);
   } catch (error) {
+    await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
     const code = error && typeof error === 'object' && 'code' in error
       ? String((error as { code?: unknown }).code)
       : '';
-    if (code === 'EEXIST') {
+    if (code === 'EEXIST' || code === 'ENOTEMPTY') {
       let owner = 'unknown';
       try {
         const metadata = await readJson(join(path, 'owner.json'));
         if (typeof metadata.transactionId === 'string') owner = metadata.transactionId;
       } catch {
-        // An incomplete lock is still an owned lock. Never remove it by guessing.
+        // A published lock always contains its owner. Never remove an
+        // incompatible or externally-created lock by guessing.
       }
       throw new Error(`Migration source root is locked by transaction ${owner}; use --resume only with its journal`);
     }
-    throw error;
-  }
-
-  try {
-    await writeFile(
-      join(path, 'owner.json'),
-      `${JSON.stringify({ transactionId, sourceRoot, pid: process.pid, createdAt: now() }, null, 2)}\n`,
-      { encoding: 'utf8', mode: 0o600 },
-    );
-  } catch (error) {
-    await rm(path, { recursive: true, force: true });
     throw error;
   }
 }
@@ -822,9 +833,21 @@ async function ensureDirectoryPath(path: string, journal: MigrationJournal): Pro
   }
 
   for (const directory of missing.reverse()) {
-    await mkdir(directory);
+    journal.creatingDirectories ??= [];
+    if (!journal.creatingDirectories.includes(directory)) {
+      journal.creatingDirectories.push(directory);
+      await persistJournal(journal);
+    }
+    try {
+      await mkdir(directory);
+    } catch (error) {
+      journal.creatingDirectories = journal.creatingDirectories.filter(item => item !== directory);
+      await persistJournal(journal).catch(() => undefined);
+      throw error;
+    }
     const identity = await pathIdentity(directory);
     if (!identity) throw new Error(`Created migration directory disappeared: ${directory}`);
+    journal.creatingDirectories = journal.creatingDirectories.filter(item => item !== directory);
     journal.createdDirectories.push({ path: directory, identity });
     await persistJournal(journal);
   }
@@ -836,16 +859,45 @@ async function assertCurrentFingerprint(path: string, expected: string, label: s
 }
 
 async function writeStagingMarker(journal: MigrationJournal): Promise<void> {
-  await mkdir(journal.stagingRoot, { recursive: true, mode: 0o700 });
-  await writeFile(
-    journal.stagingMarkerPath,
-    `${JSON.stringify({ transactionId: journal.transactionId, sourceRoot: journal.sourceRoot, stagingRoot: journal.stagingRoot }, null, 2)}\n`,
-    { encoding: 'utf8', mode: 0o600 },
-  );
+  const parent = stagingParent(journal.sourceRoot);
+  const parentStat = await tryLstat(parent);
+  if (parentStat?.isSymbolicLink() || (parentStat && !parentStat.isDirectory())) {
+    throw new Error(`Migration staging parent is not a real directory: ${parent}`);
+  }
+  if (!parentStat) await mkdir(parent, { mode: 0o700 });
+  const refreshedParent = await tryLstat(parent);
+  if (!refreshedParent?.isDirectory() || refreshedParent.isSymbolicLink()) {
+    throw new Error(`Migration staging parent is not a real directory: ${parent}`);
+  }
+  const existingRoot = await tryLstat(journal.stagingRoot);
+  if (existingRoot) {
+    throw new Error(`Migration staging root already exists: ${journal.stagingRoot}`);
+  }
+  const temporary = stagingTemporaryPath(journal);
+  await mkdir(temporary, { mode: 0o700 });
+  try {
+    await writeFile(
+      join(temporary, STAGING_MARKER),
+      `${JSON.stringify({ transactionId: journal.transactionId, sourceRoot: journal.sourceRoot, stagingRoot: journal.stagingRoot }, null, 2)}\n`,
+      { encoding: 'utf8', mode: 0o600 },
+    );
+    await rename(temporary, journal.stagingRoot);
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function assertStagingOwner(journal: MigrationJournal): Promise<void> {
   if (!(await lexists(journal.stagingRoot))) return;
+  const rootStat = await tryLstat(journal.stagingRoot);
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`Staging directory is not a real directory: ${journal.stagingRoot}`);
+  }
+  const markerStat = await tryLstat(journal.stagingMarkerPath);
+  if (!markerStat?.isFile() || markerStat.isSymbolicLink()) {
+    throw new Error(`Staging owner marker is not a regular file: ${journal.stagingMarkerPath}`);
+  }
   const metadata = await readJson(journal.stagingMarkerPath);
   if (metadata.transactionId !== journal.transactionId || metadata.stagingRoot !== journal.stagingRoot) {
     throw new Error(`Staging directory owner mismatch: ${journal.stagingRoot}`);
@@ -885,6 +937,28 @@ async function stagedContentIsOwned(operation: JournalOperation): Promise<boolea
   const rewritten = addStableAgentName(backup, operation.expectedAgentName, parseFrontmatter(backup).hasFrontmatter);
   return currentFingerprint === operation.generatedAgentRewrittenFingerprint
     && (await readFile(operation.stagePath, 'utf8')) === rewritten;
+}
+
+async function recoverCreatingDirectories(journal: MigrationJournal): Promise<void> {
+  const creating = journal.creatingDirectories ?? [];
+  if (!creating.length) return;
+  let changed = false;
+  for (const path of creating) {
+    const pathStat = await tryLstat(path);
+    if (!pathStat) {
+      changed = true;
+      continue;
+    }
+    if (!pathStat.isDirectory() || pathStat.isSymbolicLink()) {
+      throw new Error(`Interrupted created directory is not a real directory: ${path}`);
+    }
+    if (!journal.createdDirectories.some(created => created.path === path)) {
+      journal.createdDirectories.push({ path, identity: identityFromStat(pathStat) });
+    }
+    changed = true;
+  }
+  journal.creatingDirectories = [];
+  if (changed || creating.length) await persistJournal(journal);
 }
 
 async function recoverCompatibilityOwnership(journal: MigrationJournal): Promise<void> {
@@ -934,6 +1008,24 @@ async function recoverCompatibilityOwnership(journal: MigrationJournal): Promise
     }
     await persistJournal(journal);
   }
+}
+
+async function recoverAgentRegistrationOwnership(journal: MigrationJournal): Promise<void> {
+  let changed = false;
+  for (const link of journal.registration?.agentLinks ?? []) {
+    if (!link.created || link.identity || !(await lexists(link.path))) continue;
+    const pathStat = await tryLstat(link.path);
+    if (!pathStat?.isSymbolicLink()) {
+      throw new Error(`Interrupted agent registration path is not a symlink: ${link.path}`);
+    }
+    const target = resolve(dirname(link.path), await readlink(link.path));
+    if (target !== link.target) {
+      throw new Error(`Interrupted agent registration link points elsewhere: ${link.path} -> ${target}`);
+    }
+    link.identity = identityFromStat(pathStat);
+    changed = true;
+  }
+  if (changed) await persistJournal(journal);
 }
 
 async function ensureStableAgentName(
@@ -1556,22 +1648,54 @@ async function cleanCreatedDirectories(journal: MigrationJournal): Promise<strin
 }
 
 async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
-  if (!(await lexists(journal.stagingRoot))) return [];
   const issues: string[] = [];
   try {
-    await assertStagingOwner(journal);
-    const entries = await readdir(journal.stagingRoot);
-    const ownedEntries = new Set([
-      STAGING_MARKER,
-      ...journal.operations.flatMap(operation => [operation.stagePath, operation.skillShimStagePath ?? ''])
-        .filter(path => path && dirname(path) === journal.stagingRoot)
-        .map(path => basename(path)),
-    ]);
-    const unknown = entries.filter(name => !ownedEntries.has(name));
-    if (unknown.length) return [`Unknown files remain in transaction staging: ${unknown.join(', ')}`];
-    await rm(journal.stagingRoot, { recursive: true, force: true });
-    const parent = dirname(journal.stagingRoot);
-    if (await lexists(parent) && (await readdir(parent)).length === 0) await rm(parent, { recursive: true });
+    const parent = stagingParent(journal.sourceRoot);
+    const parentStat = await tryLstat(parent);
+    if (parentStat?.isSymbolicLink() || (parentStat && !parentStat.isDirectory())) {
+      return [`Migration staging parent is not a real directory: ${parent}`];
+    }
+
+    if (await lexists(journal.stagingRoot)) {
+      await assertStagingOwner(journal);
+      const entries = await readdir(journal.stagingRoot);
+      const ownedEntries = new Set([
+        STAGING_MARKER,
+        ...journal.operations.flatMap(operation => [operation.stagePath, operation.skillShimStagePath ?? ''])
+          .filter(path => path && dirname(path) === journal.stagingRoot)
+          .map(path => basename(path)),
+      ]);
+      const unknown = entries.filter(name => !ownedEntries.has(name));
+      if (unknown.length) return [`Unknown files remain in transaction staging: ${unknown.join(', ')}`];
+      await rm(journal.stagingRoot, { recursive: true, force: true });
+    }
+
+    const temporary = stagingTemporaryPath(journal);
+    if (await lexists(temporary)) {
+      const temporaryStat = await tryLstat(temporary);
+      if (!temporaryStat?.isDirectory() || temporaryStat.isSymbolicLink()) {
+        return [`Migration staging temporary path is not a real directory: ${temporary}`];
+      }
+      const marker = join(temporary, STAGING_MARKER);
+      if (await lexists(marker)) {
+        const markerStat = await tryLstat(marker);
+        if (!markerStat?.isFile() || markerStat.isSymbolicLink()) {
+          return [`Migration staging owner marker is not a regular file: ${marker}`];
+        }
+        const metadata = await readJson(marker);
+        if (metadata.transactionId !== journal.transactionId || metadata.stagingRoot !== journal.stagingRoot) {
+          return [`Staging temporary path owner mismatch: ${temporary}`];
+        }
+      } else if ((await readdir(temporary)).length > 0) {
+        return [`Unknown files remain in staging temporary path: ${temporary}`];
+      }
+      await rm(temporary, { recursive: true, force: true });
+    }
+
+    const refreshedParent = await tryLstat(parent);
+    if (refreshedParent?.isDirectory() && !refreshedParent.isSymbolicLink() && (await readdir(parent)).length === 0) {
+      await rm(parent, { recursive: true });
+    }
   } catch (error) {
     issues.push(error instanceof Error ? error.message : String(error));
   }
@@ -1633,6 +1757,13 @@ async function rollbackTransaction(journal: MigrationJournal): Promise<{ complet
   journal.phase = 'rollback';
   await persistJournal(journal);
 
+  try {
+    await recoverCreatingDirectories(journal);
+    await recoverCompatibilityOwnership(journal);
+    await recoverAgentRegistrationOwnership(journal);
+  } catch (error) {
+    issues.push(error instanceof Error ? error.message : String(error));
+  }
   issues.push(...await rollbackConfig(journal));
   issues.push(...await removeAgentRegistrationLinks(journal));
   for (const operation of [...journal.operations].reverse()) {
@@ -1739,7 +1870,9 @@ async function validateCommittedState(journal: MigrationJournal): Promise<void> 
 }
 
 async function validateInterruptedState(journal: MigrationJournal): Promise<void> {
+  await recoverCreatingDirectories(journal);
   await recoverCompatibilityOwnership(journal);
+  await recoverAgentRegistrationOwnership(journal);
   const snapshot = snapshotFromJournal(journal);
   const config = await readOpenCodeConfigSnapshot(snapshot.path);
   const allowedConfig = new Set([snapshot.fingerprint]);
@@ -1974,6 +2107,7 @@ async function createJournal(
     repositories: preflightResult.repositories,
     operations,
     createdDirectories: [],
+    creatingDirectories: [],
     prospectiveConfigText: preflightResult.prospectiveConfig.text,
     prospectiveConfigFingerprint: fingerprintText(preflightResult.prospectiveConfig.text),
     configDirectoryExisted,
@@ -2121,10 +2255,14 @@ function ensureJournalIdentity(
   }
   const configDirectory = dirname(journal.config.path);
   const registrationDirectory = opencodeConfigDir();
-  if (journal.createdDirectories.some(created => (
-    !isPathWithin(targetRoot, created.path)
-    && !isPathWithin(configDirectory, created.path)
-    && !isPathWithin(registrationDirectory, created.path)
+  const createdDirectories = [
+    ...journal.createdDirectories.map(created => created.path),
+    ...(journal.creatingDirectories ?? []),
+  ];
+  if (createdDirectories.some(path => (
+    !isPathWithin(targetRoot, path)
+    && !isPathWithin(configDirectory, path)
+    && !isPathWithin(registrationDirectory, path)
   ))) {
     throw new Error(`Migration journal contains an unsafe created directory: ${journal.transactionId}`);
   }
