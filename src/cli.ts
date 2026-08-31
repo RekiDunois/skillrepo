@@ -11,10 +11,11 @@ import {
   verifyRepoUnregistered,
   type VerifyResult,
 } from './core.js';
+import { auditMigrationRepos, renderMigrationAudit } from './audit.js';
 import { applyMigration } from './migration.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]`);
   process.exit(2);
 }
 
@@ -79,6 +80,28 @@ async function main(): Promise<void> {
 
   if (command === 'migration') {
     const [subcommand, ...migrationArgs] = rest;
+
+    if (subcommand === 'audit') {
+      const { values, positionals } = parseArgs({
+        args: migrationArgs,
+        allowPositionals: true,
+        allowNegative: true,
+        options: {
+          plan: { type: 'string', default: 'migration-plan.json' },
+          'target-root': { type: 'string' },
+          json: { type: 'boolean', default: false },
+        },
+      });
+      if (positionals.length || !values['target-root']) usage();
+
+      const result = await auditMigrationRepos({
+        planPath: values.plan!,
+        targetRoot: values['target-root'],
+      });
+      console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationAudit(result));
+      return;
+    }
+
     if (subcommand !== 'apply') usage();
 
     const { values, positionals } = parseArgs({
