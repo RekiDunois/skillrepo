@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "bin": { "skillrepo": "./dist/src/cli.js" },
+  "files": ["dist/src", "README.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "test": "npm run build && node --test dist/test/**/*.test.js"
   },
   "engines": { "node": ">=22" },
