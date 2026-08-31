@@ -1,4 +1,4 @@
-import { access, lstat, mkdir, readFile, readdir, rename, symlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, readFile, readdir, readlink, rename, symlink, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
@@ -26,6 +26,7 @@ type MigrationPlan = {
 };
 
 type MoveKind = 'skill' | 'agent' | 'lib';
+type MoveState = 'pending' | 'moved';
 
 type MoveOperation = {
   kind: MoveKind;
@@ -40,6 +41,7 @@ export type MigrationApplyOptions = {
   targetRoot: string;
   dryRun?: boolean;
   verify?: boolean;
+  resume?: boolean;
 };
 
 export type MigrationApplyResult = {
@@ -48,6 +50,7 @@ export type MigrationApplyResult = {
   targetRoot: string;
   repositories: string[];
   moves: MoveOperation[];
+  resumedMoves: MoveOperation[];
   compatibilityPaths: string[];
   verification: VerifyResult[];
 };
@@ -73,6 +76,14 @@ async function lexists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function tryLstat(path: string) {
+  try {
+    return await lstat(path);
+  } catch {
+    return undefined;
   }
 }
 
@@ -223,15 +234,36 @@ function assertNoOverlaps(operations: MoveOperation[]): void {
   }
 }
 
-async function preflight(operations: MoveOperation[]): Promise<void> {
-  assertNoOverlaps(operations);
-  for (const operation of operations) {
-    let sourceStat;
-    try {
-      sourceStat = await lstat(operation.source);
-    } catch {
-      throw new Error(`Migration source does not exist: ${operation.source}`);
-    }
+async function resolvedSymlinkTarget(path: string): Promise<string | undefined> {
+  const stat = await tryLstat(path);
+  if (!stat?.isSymbolicLink()) return undefined;
+  return resolve(dirname(path), await readlink(path));
+}
+
+async function skillCompatTarget(path: string): Promise<string | undefined> {
+  const marker = join(path, '.skillrepo-compat.json');
+  try {
+    const value = JSON.parse(await readFile(marker, 'utf8')) as Record<string, unknown>;
+    return typeof value.target === 'string' ? resolve(value.target) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function classifyOperation(operation: MoveOperation, resume: boolean): Promise<MoveState> {
+  const sourceStat = await tryLstat(operation.source);
+  const targetStat = await tryLstat(operation.target);
+
+  const sourceIsPending = Boolean(
+    sourceStat
+    && !sourceStat.isSymbolicLink()
+    && (operation.kind === 'skill' ? sourceStat.isDirectory() : operation.kind === 'agent' ? sourceStat.isFile() : true),
+  );
+
+  if (sourceIsPending && !targetStat) return 'pending';
+
+  if (!resume) {
+    if (!sourceStat) throw new Error(`Migration source does not exist: ${operation.source}`);
     if (sourceStat.isSymbolicLink()) throw new Error(`Refusing to migrate symlink source: ${operation.source}`);
     if (operation.kind === 'skill' && !sourceStat.isDirectory()) {
       throw new Error(`Skill source is not a directory: ${operation.source}`);
@@ -239,8 +271,67 @@ async function preflight(operations: MoveOperation[]): Promise<void> {
     if (operation.kind === 'agent' && !sourceStat.isFile()) {
       throw new Error(`Agent source is not a file: ${operation.source}`);
     }
-    if (await lexists(operation.target)) throw new Error(`Migration target already exists: ${operation.target}`);
+    if (targetStat) throw new Error(`Migration target already exists: ${operation.target}`);
+    throw new Error(`Migration source has an unsupported type: ${operation.source}`);
   }
+
+  if (operation.kind === 'skill') {
+    const markerTarget = sourceStat?.isDirectory() ? await skillCompatTarget(operation.source) : undefined;
+    if (
+      targetStat?.isDirectory()
+      && sourceStat?.isDirectory()
+      && markerTarget === operation.target
+      && !(await lexists(join(operation.source, 'SKILL.md')))
+    ) {
+      return 'moved';
+    }
+  } else if (operation.kind === 'agent' && operation.target.endsWith('.md')) {
+    if (!sourceStat && targetStat?.isFile()) return 'moved';
+  } else {
+    const linkTarget = await resolvedSymlinkTarget(operation.source);
+    if (targetStat && linkTarget === operation.target) return 'moved';
+  }
+
+  throw new Error(
+    `Migration resume state is not recognized: ${operation.source} -> ${operation.target}. `
+    + 'Refusing to guess whether this path was moved by skillrepo.',
+  );
+}
+
+async function validateFrontmatter(path: string): Promise<void> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (error) {
+    throw new Error(`${path}: cannot read frontmatter source: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  try {
+    parseFrontmatter(text);
+  } catch (error) {
+    throw new Error(`${path}: invalid YAML frontmatter: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function preflight(
+  operations: MoveOperation[],
+  resume: boolean,
+): Promise<Map<string, MoveState>> {
+  assertNoOverlaps(operations);
+  const states = new Map<string, MoveState>();
+
+  for (const operation of operations) {
+    const state = await classifyOperation(operation, resume);
+    states.set(operation.target, state);
+
+    if (operation.kind === 'skill') {
+      await validateFrontmatter(join(state === 'moved' ? operation.target : operation.source, 'SKILL.md'));
+    } else if (operation.kind === 'agent' && operation.target.endsWith('.md')) {
+      await validateFrontmatter(state === 'moved' ? operation.target : operation.source);
+    }
+  }
+
+  return states;
 }
 
 function frontmatter(text: string): Record<string, unknown> | null {
@@ -335,7 +426,8 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
 
   const operations = buildOperations(plan, sourceRoot, targetRoot);
   if (!operations.length) throw new Error('Migration plan has no CREATE_AND_MOVE operations');
-  await preflight(operations);
+  const states = await preflight(operations, options.resume === true);
+  const resumedMoves = operations.filter(operation => states.get(operation.target) === 'moved');
 
   const repositories = [...new Set(operations.map(operation => operation.repoId))];
   if (options.dryRun) {
@@ -345,6 +437,7 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
       targetRoot,
       repositories,
       moves: operations,
+      resumedMoves,
       compatibilityPaths: [],
       verification: [],
     };
@@ -352,7 +445,16 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
 
   const compatibilityPaths: string[] = [];
   for (const operation of operations) {
+    if (states.get(operation.target) === 'moved') continue;
     compatibilityPaths.push(...await moveOperation(operation));
+  }
+
+  // A resumed run may start from a state produced by an older failed apply.
+  // Re-assert stable names for all moved Markdown agents before registration.
+  for (const operation of operations) {
+    if (operation.kind === 'agent' && operation.target.endsWith('.md')) {
+      await ensureStableAgentName(operation.target);
+    }
   }
 
   const verification: VerifyResult[] = [];
@@ -377,6 +479,7 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
     targetRoot,
     repositories,
     moves: operations,
+    resumedMoves,
     compatibilityPaths,
     verification,
   };
