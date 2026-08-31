@@ -146,9 +146,9 @@ test('generated file-noise patterns cover every concrete observed path', async (
   }
 });
 
-test('verification failure removes only the unchanged gitignore created by this invocation', async t => {
+test('verification failure leaves the atomically published gitignore for manual review', async t => {
   if (process.platform === 'win32') { t.skip('shell wrapper fixture is POSIX-only'); return; }
-  const root = await mkdtemp(join(tmpdir(), 'skillrepo-ignore-rollback-'));
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-ignore-verification-failure-'));
   const targetRoot = join(root, 'repos');
   const repo = join(targetRoot, 'active-repo');
   const plan = join(root, 'migration-plan.json');
@@ -172,17 +172,19 @@ test('verification failure removes only the unchanged gitignore created by this 
 
     await assert.rejects(
       applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false, gitPath: fakeGit }),
-      /Git verification did not ignore all observed paths/,
+      /left in place for manual review.*never deletes a published \.gitignore/,
     );
-    await assert.rejects(access(gitignore), 'failed verification must roll back the unchanged file created by skillrepo');
+    const text = await readFile(gitignore, 'utf8');
+    assert.match(text, /# skillrepo: generated runtime\/cache ignores/);
+    assert.match(text, /^\*\.log$/m);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test('verification rollback never deletes a concurrently edited gitignore', async t => {
+test('verification failure never deletes a concurrently edited published gitignore', async t => {
   if (process.platform === 'win32') { t.skip('shell wrapper fixture is POSIX-only'); return; }
-  const root = await mkdtemp(join(tmpdir(), 'skillrepo-ignore-rollback-edit-'));
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-ignore-verification-edit-'));
   const targetRoot = join(root, 'repos');
   const repo = join(targetRoot, 'active-repo');
   const plan = join(root, 'migration-plan.json');
@@ -207,7 +209,7 @@ test('verification rollback never deletes a concurrently edited gitignore', asyn
 
     await assert.rejects(
       applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false, gitPath: fakeGit }),
-      /rollback was skipped because .* no longer matched/,
+      /left in place for manual review.*never deletes a published \.gitignore/,
     );
     assert.match(await readFile(gitignore, 'utf8'), /# user edit/);
   } finally {
