@@ -35,7 +35,7 @@ export type MigrationPortabilityResult = {
   };
 };
 
-const HOME_PATH = /(?:\/Users\/[^/\s'"`]+\/|\/home\/[^/\s'"`]+\/|[A-Za-z]:\\Users\\[^\\\s'"`]+\\)/;
+const HOME_PATH = /(?:\/Users\/[^/\s'"`]+\/|\/home\/[^/\s'"`]+\/|[A-Za-z]:[\\/]Users[\\/][^\\/\s'"`]+[\\/])/i;
 
 function isTestPath(path: string): boolean {
   const normalized = `/${path.replaceAll('\\', '/')}/`;
@@ -65,12 +65,8 @@ function classifySegments(path: string, lines: string[], hitIndexes: number[]): 
     const frontmatter = end >= 0 ? hitIndexes.filter(index => index <= end) : [];
     const body = hitIndexes.filter(index => end < 0 || index > end);
     const segments: PortabilitySegment[] = [];
-    if (frontmatter.length) {
-      segments.push({ kind: 'FRONTMATTER-RUNTIME', lines: frontmatter.map(index => index + 1) });
-    }
-    if (body.length) {
-      segments.push({ kind: 'MARKDOWN-BODY', lines: body.map(index => index + 1) });
-    }
+    if (frontmatter.length) segments.push({ kind: 'FRONTMATTER-RUNTIME', lines: frontmatter.map(index => index + 1) });
+    if (body.length) segments.push({ kind: 'MARKDOWN-BODY', lines: body.map(index => index + 1) });
     return segments;
   }
 
@@ -89,6 +85,8 @@ function hasSegment(item: PortabilityItem, kind: PortabilityKind): boolean {
 export async function classifyMigrationPortability(options: {
   planPath: string;
   targetRoot: string;
+  gitPath?: string;
+  env?: NodeJS.ProcessEnv;
 }): Promise<MigrationPortabilityResult> {
   const audit = await auditMigrationRepos(options);
   const items: PortabilityItem[] = [];
@@ -103,9 +101,7 @@ export async function classifyMigrationPortability(options: {
         .map((line, index) => HOME_PATH.test(line) ? index : -1)
         .filter(index => index >= 0);
 
-      if (!hitIndexes.length) {
-        throw new Error(`Portability finding no longer matches file contents: ${file}`);
-      }
+      if (!hitIndexes.length) throw new Error(`Portability finding no longer matches file contents: ${file}`);
 
       const segments = classifySegments(finding.path, lines, hitIndexes);
       items.push({
@@ -149,9 +145,7 @@ export function renderMigrationPortability(result: MigrationPortabilityResult): 
       continue;
     }
     lines.push(`  [MIXED] ${item.path}`);
-    for (const segment of item.segments) {
-      lines.push(`    [${segment.kind}] ${segment.lines.join(',')}`);
-    }
+    for (const segment of item.segments) lines.push(`    [${segment.kind}] ${segment.lines.join(',')}`);
   }
 
   lines.push(
