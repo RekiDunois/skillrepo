@@ -22,11 +22,12 @@ async function runProcess(
   return await new Promise<ProcessResult>((resolvePromise, reject) => {
     let stdout = '';
     let stderr = '';
+    const hasInput = options.input !== undefined;
     const child = spawn(command, args, {
       shell: false,
       cwd: options.cwd,
       env: options.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
     child.stdout.on('data', data => stdout += data);
     child.stderr.on('data', data => stderr += data);
@@ -38,7 +39,12 @@ async function runProcess(
       }
       resolvePromise({ code: code ?? 1, stdout, stderr });
     });
-    child.stdin.end(options.input ?? '');
+    if (hasInput && child.stdin) {
+      child.stdin.on('error', error => {
+        if (errnoCode(error) !== 'EPIPE') reject(error);
+      });
+      child.stdin.end(options.input);
+    }
   });
 }
 
@@ -147,7 +153,8 @@ export async function probeIgnoredPaths(
       { cwd: repoRoot, env, input: `${unique.join('\0')}\0` },
     );
     if (result.code !== 0 && result.code !== 1) {
-      throw new Error(`Git check-ignore failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`);
+      throw new Error(`Git check-ignore failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`,
+      );
     }
     for (const relPath of result.stdout.split('\0')) if (relPath) ignored.add(relPath);
     return ignored;
