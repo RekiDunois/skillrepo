@@ -365,7 +365,9 @@ export async function unregisterRepo(repoInput: string): Promise<void> {
   }
 }
 
-export async function runOpenCode(args: string[], env = process.env): Promise<VerifyResult> {
+let openCodeQueue: Promise<void> = Promise.resolve();
+
+async function executeOpenCode(args: string[], env: NodeJS.ProcessEnv): Promise<VerifyResult> {
   return await new Promise(resolvePromise => {
     const child = spawn('opencode', args, {
       shell: false,
@@ -389,6 +391,12 @@ export async function runOpenCode(args: string[], env = process.env): Promise<Ve
       stderr,
     }));
   });
+}
+
+export function runOpenCode(args: string[], env = process.env): Promise<VerifyResult> {
+  const run = openCodeQueue.then(() => executeOpenCode(args, env));
+  openCodeQueue = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 function containsIdentifier(output: string, id: string): boolean {
