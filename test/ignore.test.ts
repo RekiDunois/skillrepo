@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +58,38 @@ test('migration ignore dry-run is read-only and execute appends only safe observ
     const second = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false });
     assert.equal(second.patterns, 0, 'second execution must be idempotent');
     assert.equal(await readFile(gitignore, 'utf8'), text);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('migration ignore refuses symlinked repositories and .gitignore files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-ignore-symlink-'));
+  const targetRoot = join(root, 'repos');
+  const outside = join(root, 'outside');
+  const plan = join(root, 'migration-plan.json');
+
+  try {
+    await writePlan(plan);
+    await mkdir(join(outside, 'skills', 'demo'), { recursive: true });
+    await writeFile(join(outside, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\n---\n', 'utf8');
+    await writeFile(join(outside, '.gitignore'), '*.log\n', 'utf8');
+    await mkdir(targetRoot, { recursive: true });
+    await symlink(outside, join(targetRoot, 'active-repo'));
+    await assert.rejects(
+      () => applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }),
+      /not a real directory/,
+    );
+
+    await rm(join(targetRoot, 'active-repo'));
+    await mkdir(join(targetRoot, 'active-repo', 'skills', 'demo'), { recursive: true });
+    await writeFile(join(targetRoot, 'active-repo', 'skills', 'demo', 'SKILL.md'), '---\nname: demo\n---\n', 'utf8');
+    await symlink(join(root, 'shared.gitignore'), join(targetRoot, 'active-repo', '.gitignore'));
+    await writeFile(join(root, 'shared.gitignore'), '*.log\n', 'utf8');
+    await assert.rejects(
+      () => applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }),
+      /symlinked \.gitignore/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

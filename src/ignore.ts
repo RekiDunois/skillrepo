@@ -1,7 +1,8 @@
-import { access, readFile, writeFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
-import { join } from 'node:path';
+import { chmod, lstat, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { basename, dirname, join } from 'node:path';
 import { auditMigrationRepos } from './audit.js';
+import { fingerprintText } from './core.js';
 
 export type IgnoreRepoPlan = {
   repoId: string;
@@ -44,12 +45,80 @@ const SAFE_AUTO_IGNORE_PATTERNS = new Set([
   '*-debug.log*',
 ]);
 
-async function exists(path: string): Promise<boolean> {
+type GitignoreSnapshot = {
+  existed: boolean;
+  text: string;
+  fingerprint: string;
+  identity?: { dev: number; ino: number };
+  mode?: number;
+};
+
+function isNotFound(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === 'ENOENT');
+}
+
+async function readGitignoreSnapshot(repoPath: string, gitignorePath: string): Promise<GitignoreSnapshot> {
   try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
+    const repoStat = await lstat(repoPath);
+    if (!repoStat.isDirectory() || repoStat.isSymbolicLink()) {
+      throw new Error(`Migration ignore repository is not a real directory: ${repoPath}`);
+    }
+    let gitignoreStat;
+    try {
+      gitignoreStat = await lstat(gitignorePath);
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      return { existed: false, text: '', fingerprint: 'absent' };
+    }
+    if (gitignoreStat.isSymbolicLink()) throw new Error(`Refusing to write symlinked .gitignore: ${gitignorePath}`);
+    if (!gitignoreStat.isFile()) throw new Error(`Migration ignore path is not a regular file: ${gitignorePath}`);
+    const text = await readFile(gitignorePath, 'utf8');
+    return {
+      existed: true,
+      text,
+      fingerprint: fingerprintText(text),
+      identity: { dev: Number(gitignoreStat.dev), ino: Number(gitignoreStat.ino) },
+      mode: gitignoreStat.mode & 0o7777,
+    };
+  } catch (error) {
+    if (isNotFound(error)) {
+      return { existed: false, text: '', fingerprint: 'absent' };
+    }
+    throw error;
+  }
+}
+
+async function assertGitignoreSnapshotCurrent(
+  repoPath: string,
+  gitignorePath: string,
+  snapshot: GitignoreSnapshot,
+): Promise<void> {
+  const current = await readGitignoreSnapshot(repoPath, gitignorePath);
+  if (
+    current.existed !== snapshot.existed
+    || current.fingerprint !== snapshot.fingerprint
+    || (snapshot.identity && (!current.identity || current.identity.dev !== snapshot.identity.dev || current.identity.ino !== snapshot.identity.ino))
+  ) {
+    throw new Error(`.gitignore changed during migration ignore application: ${gitignorePath}`);
+  }
+}
+
+async function writeGitignoreAtomically(
+  repoPath: string,
+  gitignorePath: string,
+  snapshot: GitignoreSnapshot,
+  text: string,
+): Promise<void> {
+  await assertGitignoreSnapshotCurrent(repoPath, gitignorePath, snapshot);
+  const temporary = join(dirname(gitignorePath), `.${basename(gitignorePath)}.skillrepo-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, text, { encoding: 'utf8', mode: snapshot.mode ?? 0o644, flag: 'wx' });
+    if (snapshot.mode !== undefined) await chmod(temporary, snapshot.mode);
+    await assertGitignoreSnapshotCurrent(repoPath, gitignorePath, snapshot);
+    await rename(temporary, gitignorePath);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -81,7 +150,8 @@ export async function applyMigrationIgnores(options: {
   for (const repo of audit.repositories) {
     if (!repo.exists) continue;
     const gitignorePath = join(repo.repoPath, '.gitignore');
-    const current = await exists(gitignorePath) ? await readFile(gitignorePath, 'utf8') : '';
+    const snapshot = await readGitignoreSnapshot(repo.repoPath, gitignorePath);
+    const current = snapshot.text;
     const present = existingPatterns(current);
     const patterns = repo.ignoreCandidates
       .map(candidate => candidate.pattern)
@@ -90,7 +160,7 @@ export async function applyMigrationIgnores(options: {
 
     if (!patterns.length) continue;
     repositories.push({ repoId: repo.repoId, repoPath: repo.repoPath, gitignorePath, patterns });
-    if (!dryRun) await writeFile(gitignorePath, appendPatterns(current, patterns), 'utf8');
+    if (!dryRun) await writeGitignoreAtomically(repo.repoPath, gitignorePath, snapshot, appendPatterns(current, patterns));
   }
 
   return {

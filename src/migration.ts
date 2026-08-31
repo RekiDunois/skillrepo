@@ -1,4 +1,5 @@
 import {
+  chmod,
   lstat,
   mkdir,
   readFile,
@@ -106,7 +107,9 @@ type JournalOperation = MoveOperation & {
     markerPath: string;
     linked: string[];
     skipped: string[];
+    state?: 'creating' | 'complete';
   };
+  skillShimStagePath?: string;
   generatedAgentBackupPath?: string;
   generatedAgentOriginalFingerprint?: string;
   generatedAgentRewrittenFingerprint?: string;
@@ -736,7 +739,7 @@ async function persistJournal(journal: MigrationJournal): Promise<void> {
   journal.updatedAt = now();
   const temporary = `${journal.journalPath}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, 'utf8');
+    await writeFile(temporary, `${JSON.stringify(journal, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     await rename(temporary, journal.journalPath);
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
@@ -758,7 +761,7 @@ async function readJson(path: string): Promise<Record<string, unknown>> {
 async function acquireLock(sourceRoot: string, transactionId: string): Promise<void> {
   const path = lockPath(sourceRoot);
   try {
-    await mkdir(path);
+    await mkdir(path, { mode: 0o700 });
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error
       ? String((error as { code?: unknown }).code)
@@ -780,7 +783,7 @@ async function acquireLock(sourceRoot: string, transactionId: string): Promise<v
     await writeFile(
       join(path, 'owner.json'),
       `${JSON.stringify({ transactionId, sourceRoot, pid: process.pid, createdAt: now() }, null, 2)}\n`,
-      'utf8',
+      { encoding: 'utf8', mode: 0o600 },
     );
   } catch (error) {
     await rm(path, { recursive: true, force: true });
@@ -833,11 +836,11 @@ async function assertCurrentFingerprint(path: string, expected: string, label: s
 }
 
 async function writeStagingMarker(journal: MigrationJournal): Promise<void> {
-  await mkdir(journal.stagingRoot, { recursive: true });
+  await mkdir(journal.stagingRoot, { recursive: true, mode: 0o700 });
   await writeFile(
     journal.stagingMarkerPath,
     `${JSON.stringify({ transactionId: journal.transactionId, sourceRoot: journal.sourceRoot, stagingRoot: journal.stagingRoot }, null, 2)}\n`,
-    'utf8',
+    { encoding: 'utf8', mode: 0o600 },
   );
 }
 
@@ -884,6 +887,55 @@ async function stagedContentIsOwned(operation: JournalOperation): Promise<boolea
     && (await readFile(operation.stagePath, 'utf8')) === rewritten;
 }
 
+async function recoverCompatibilityOwnership(journal: MigrationJournal): Promise<void> {
+  for (const operation of journal.operations) {
+    if (operation.fileCompatibilityTarget && !operation.fileCompatibilityCreated) {
+      const pathStat = await tryLstat(operation.source);
+      if (pathStat?.isSymbolicLink()) {
+        const target = resolve(dirname(operation.source), await readlink(operation.source));
+        if (target !== operation.fileCompatibilityTarget) {
+          throw new Error(`Interrupted compatibility link points elsewhere: ${operation.source} -> ${target}`);
+        }
+        operation.fileCompatibilityCreated = true;
+        operation.fileCompatibilityIdentity = identityFromStat(pathStat);
+        await persistJournal(journal);
+      }
+    }
+
+    if (!operation.skillShim || !(await lexists(operation.source))) continue;
+    const sourceStat = await tryLstat(operation.source);
+    if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink()) {
+      throw new Error(`Interrupted skill compatibility path is not a real directory: ${operation.source}`);
+    }
+    const markerPath = join(operation.source, COMPAT_MARKER);
+    const metadata = await readJson(markerPath);
+    if (metadata.transactionId !== journal.transactionId
+      || metadata.operationId !== operation.operationId
+      || metadata.target !== operation.target) {
+      throw new Error(`Interrupted skill compatibility shim owner mismatch: ${operation.source}`);
+    }
+    operation.skillShim.markerPath = markerPath;
+    operation.skillShimIdentity ??= identityFromStat(sourceStat);
+    const linked = Array.isArray(metadata.linked)
+      ? metadata.linked.filter((value): value is string => typeof value === 'string')
+      : [];
+    for (const name of linked) {
+      if (basename(name) !== name || name === '.' || name === '..') {
+        throw new Error(`Unsafe compatibility link recorded in ${operation.source}: ${name}`);
+      }
+      const path = join(operation.source, name);
+      const pathStat = await tryLstat(path);
+      if (!pathStat?.isSymbolicLink()) continue;
+      const target = resolve(dirname(path), await readlink(path));
+      if (target !== join(operation.target, name)) {
+        throw new Error(`Interrupted compatibility link points elsewhere: ${path} -> ${target}`);
+      }
+      operation.compatibilityIdentities[path] ??= identityFromStat(pathStat);
+    }
+    await persistJournal(journal);
+  }
+}
+
 async function ensureStableAgentName(
   path: string,
   journal: MigrationJournal,
@@ -899,7 +951,7 @@ async function ensureStableAgentName(
   }
 
   const backupPath = join(journal.journalPath, '..', `${operation.operationId}.original`);
-  await writeFile(backupPath, text, 'utf8');
+  await writeFile(backupPath, text, { encoding: 'utf8', mode: 0o600 });
   operation.generatedAgentBackupPath = resolve(backupPath);
   const pathStat = await lstat(path);
   operation.generatedAgentOriginalFingerprint = fingerprintBuffer(`file\0${pathStat.mode & 0o7777}\0`, Buffer.from(text, 'utf8'));
@@ -922,6 +974,7 @@ async function writeSkillShimMarker(
   state: 'creating' | 'complete',
 ): Promise<void> {
   const shim = operation.skillShim!;
+  shim.state = state;
   await writeFile(
     shim.markerPath,
     `${JSON.stringify({
@@ -932,7 +985,7 @@ async function writeSkillShimMarker(
       skipped: shim.skipped,
       state,
     }, null, 2)}\n`,
-    'utf8',
+    { encoding: 'utf8', mode: 0o600 },
   );
 }
 
@@ -946,11 +999,17 @@ async function createSkillCompatibilityShim(
     linked: [],
     skipped: [],
   };
+  operation.skillShimStagePath ??= join(journal.stagingRoot, `${operation.operationId}-compat`);
   await persistJournal(journal);
-  await mkdir(operation.source);
+  if (await lexists(operation.skillShimStagePath)) throw new Error(`Compatibility staging path already exists: ${operation.skillShimStagePath}`);
+  await mkdir(operation.skillShimStagePath, { mode: 0o700 });
+  operation.skillShim.markerPath = join(operation.skillShimStagePath, COMPAT_MARKER);
+  await writeSkillShimMarker(operation, journal, 'creating');
+  if (await lexists(operation.source)) throw new Error(`Compatibility source path was recreated externally: ${operation.source}`);
+  await rename(operation.skillShimStagePath, operation.source);
+  operation.skillShim.markerPath = join(operation.source, COMPAT_MARKER);
   operation.skillShimIdentity = await pathIdentity(operation.source);
   if (!operation.skillShimIdentity) throw new Error(`Compatibility directory disappeared after creation: ${operation.source}`);
-  await writeSkillShimMarker(operation, journal, 'creating');
   await persistJournal(journal);
 
   for (const entry of await readdir(operation.target, { withFileTypes: true })) {
@@ -965,17 +1024,20 @@ async function createSkillCompatibilityShim(
 
     const sourceChild = join(operation.source, entry.name);
     if (await lexists(sourceChild)) throw new Error(`Compatibility path already exists: ${sourceChild}`);
+    operation.skillShim.linked.push(sourceChild);
+    operation.compatibilityPaths.push(sourceChild);
+    await writeSkillShimMarker(operation, journal, 'creating');
+    await persistJournal(journal);
     await symlink(targetChild, sourceChild);
     const identity = await pathIdentity(sourceChild);
     if (!identity) throw new Error(`Compatibility link disappeared after creation: ${sourceChild}`);
-    operation.skillShim.linked.push(sourceChild);
-    operation.compatibilityPaths.push(sourceChild);
     operation.compatibilityIdentities[sourceChild] = identity;
     await writeSkillShimMarker(operation, journal, 'creating');
     await persistJournal(journal);
   }
 
   await writeSkillShimMarker(operation, journal, 'complete');
+  await persistJournal(journal);
 }
 
 async function createFileCompatibilityShim(
@@ -1282,7 +1344,7 @@ async function verifySkillShim(operation: JournalOperation, journal: MigrationJo
     const path = join(operation.source, name);
     const pathStat = await tryLstat(path);
     if (!pathStat?.isSymbolicLink()) {
-      issues.push(`Missing compatibility link: ${path}`);
+      if (metadata.state !== 'creating') issues.push(`Missing compatibility link: ${path}`);
       continue;
     }
     if (!sameIdentity(operation.compatibilityIdentities[path], identityFromStat(pathStat))) {
@@ -1499,7 +1561,13 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
   try {
     await assertStagingOwner(journal);
     const entries = await readdir(journal.stagingRoot);
-    const unknown = entries.filter(name => name !== STAGING_MARKER);
+    const ownedEntries = new Set([
+      STAGING_MARKER,
+      ...journal.operations.flatMap(operation => [operation.stagePath, operation.skillShimStagePath ?? ''])
+        .filter(path => path && dirname(path) === journal.stagingRoot)
+        .map(path => basename(path)),
+    ]);
+    const unknown = entries.filter(name => !ownedEntries.has(name));
     if (unknown.length) return [`Unknown files remain in transaction staging: ${unknown.join(', ')}`];
     await rm(journal.stagingRoot, { recursive: true, force: true });
     const parent = dirname(journal.stagingRoot);
@@ -1671,6 +1739,7 @@ async function validateCommittedState(journal: MigrationJournal): Promise<void> 
 }
 
 async function validateInterruptedState(journal: MigrationJournal): Promise<void> {
+  await recoverCompatibilityOwnership(journal);
   const snapshot = snapshotFromJournal(journal);
   const config = await readOpenCodeConfigSnapshot(snapshot.path);
   const allowedConfig = new Set([snapshot.fingerprint]);
@@ -1770,6 +1839,12 @@ function journalMatchesPlan(
   return operations.every(operation => journal.operations.some(candidate => operationMatches(candidate, operation)));
 }
 
+function journalNeedsRecovery(journal: MigrationJournal): boolean {
+  return journal.status === 'in-progress'
+    || journal.status === 'moved-uncommitted'
+    || journal.status === 'rollback-incomplete';
+}
+
 async function loadJournals(sourceRoot: string): Promise<MigrationJournal[]> {
   const directory = journalDirectory(sourceRoot);
   if (!(await lexists(directory))) return [];
@@ -1803,7 +1878,7 @@ async function matchingJournal(
     journal.planPath === planPath && journal.sourceRoot === sourceRoot && journal.targetRoot === targetRoot
   ));
   const changedPlan = related
-    .filter(journal => journal.status !== 'rollback-complete' && journal.status !== 'preflight-failed')
+    .filter(journalNeedsRecovery)
     .find(journal => journal.planFingerprint !== planFingerprint);
   if (changedPlan) throw new Error(`Migration plan changed since transaction ${changedPlan.transactionId}; refusing to resume or overwrite it`);
   const matches = related
@@ -1835,6 +1910,21 @@ function resultFromJournal(
   };
 }
 
+async function cleanCommittedSecrets(journal: MigrationJournal): Promise<void> {
+  for (const operation of journal.operations) {
+    if (operation.generatedAgentBackupPath) {
+      await unlink(operation.generatedAgentBackupPath).catch(() => undefined);
+      operation.generatedAgentBackupPath = undefined;
+    }
+  }
+  // A committed transaction no longer needs the original config or agent
+  // contents for rollback.
+  journal.config.originalText = undefined;
+  journal.prospectiveConfigText = '';
+  if (journal.registration) journal.registration.prospectiveConfigText = '';
+  await persistJournal(journal);
+}
+
 async function createJournal(
   transactionId: string,
   planPath: string,
@@ -1850,6 +1940,7 @@ async function createJournal(
     throw new Error(`Migration journal directory is not a real directory: ${directory}`);
   }
   await mkdir(directory, { recursive: true });
+  await chmod(directory, 0o700);
 
   const journalPath = join(directory, `${transactionId}.json`);
   const stagingRoot = join(sourceRoot, STAGING_DIRECTORY, transactionId);
@@ -1951,9 +2042,7 @@ async function executeTransaction(
   journal.phase = 'committed';
   journal.status = 'committed';
   await persistJournal(journal);
-  for (const operation of journal.operations) {
-    if (operation.generatedAgentBackupPath) await unlink(operation.generatedAgentBackupPath).catch(() => undefined);
-  }
+  await cleanCommittedSecrets(journal);
   await releaseLock(journal.sourceRoot, journal.transactionId);
 
   return {
@@ -2011,8 +2100,17 @@ function ensureJournalIdentity(
     if (!isPathWithin(sourceRoot, operation.source) || !isPathWithin(targetRoot, operation.target) || !isPathWithin(expectedStaging, operation.stagePath)) {
       throw new Error(`Migration journal contains an unsafe operation path: ${operation.operationId}`);
     }
-    if (operation.kind === 'skill' && operation.skillShim && operation.skillShim.markerPath !== join(operation.source, COMPAT_MARKER)) {
-      throw new Error(`Migration journal contains an unsafe compatibility marker: ${operation.operationId}`);
+    if (operation.kind === 'skill' && operation.skillShim) {
+      const expectedMarker = join(operation.source, COMPAT_MARKER);
+      const stagedMarker = operation.skillShimStagePath
+        ? join(operation.skillShimStagePath, COMPAT_MARKER)
+        : undefined;
+      if (operation.skillShim.markerPath !== expectedMarker && operation.skillShim.markerPath !== stagedMarker) {
+        throw new Error(`Migration journal contains an unsafe compatibility marker: ${operation.operationId}`);
+      }
+      if (operation.skillShimStagePath && !isPathWithin(expectedStaging, operation.skillShimStagePath)) {
+        throw new Error(`Migration journal contains an unsafe compatibility staging path: ${operation.operationId}`);
+      }
     }
     if (operation.generatedAgentBackupPath && !isPathWithin(journalDirectory(sourceRoot), operation.generatedAgentBackupPath)) {
       throw new Error(`Migration journal contains an unsafe agent backup path: ${operation.operationId}`);
@@ -2064,6 +2162,7 @@ async function resumeOrRecover(
       const failures = verification.filter(result => !result.ok);
       if (failures.length) throw new Error(`OpenCode discovery verification failed:\n${failures.map(result => `${result.command}: ${result.stderr.trim() || 'verification failed'}`).join('\n')}`);
     }
+    await cleanCommittedSecrets(journal);
     if (owner === journal.transactionId) await releaseLock(journal.sourceRoot, journal.transactionId);
     return resultFromJournal(journal, options, verification);
   }
@@ -2141,15 +2240,19 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
     throw new Error(`Migration plan changed during preflight: ${planPath}`);
   }
   const transactionId = randomUUID();
-  await acquireLock(sourceRoot, transactionId);
-  let journal: MigrationJournal | undefined;
+  const journal = await createJournal(transactionId, planPath, planFingerprint, sourceRoot, targetRoot, preflightResult, configSnapshot);
+  let lockAcquired = false;
   try {
+    // Persist the transaction identity before taking the lock so a crash in
+    // this boundary leaves a journal that --resume can safely inspect.
+    await acquireLock(sourceRoot, transactionId);
+    lockAcquired = true;
     await assertFreshState(preflightResult.operations, configSnapshot);
-    journal = await createJournal(transactionId, planPath, planFingerprint, sourceRoot, targetRoot, preflightResult, configSnapshot);
     return await executeTransaction(journal, preflightResult, options);
   } catch (error) {
-    if (!journal) {
-      await releaseLock(sourceRoot, transactionId).catch(() => undefined);
+    if (!lockAcquired) {
+      journal.status = 'preflight-failed';
+      await cleanCommittedSecrets(journal).catch(() => undefined);
       throw error;
     }
     if (journal.status === 'committed') {

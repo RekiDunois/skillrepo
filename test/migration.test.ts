@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, chmod, mkdir, readFile, readlink, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, readlink, readdir, rm, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -146,6 +146,36 @@ test('migration mechanically moves content, keeps runtime compatibility, and reg
 
       const config = await readFile(join(f.sourceRoot, 'opencode.jsonc'), 'utf8');
       assert.match(config, /demo-repo/);
+      const journal = JSON.parse(await readFile(result.journalPath!, 'utf8')) as {
+        config: { originalText?: string };
+        prospectiveConfigText: string;
+        operations: Array<{ generatedAgentBackupPath?: string }>;
+      };
+      assert.equal(journal.config.originalText, undefined);
+      assert.equal(journal.prospectiveConfigText, '');
+      assert.equal(journal.operations.some(operation => operation.generatedAgentBackupPath), false);
+      assert.equal((await lstat(result.journalPath!)).mode & 0o077, 0);
+      assert.equal((await lstat(join(f.sourceRoot, '.skillrepo-migrations'))).mode & 0o777, 0o700);
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a committed journal does not block a later revision of the same plan', async () => {
+  const f = await fixture();
+  try {
+    await withConfigDir(f.sourceRoot, async () => {
+      await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, verify: false });
+      await writeFile(f.planPath, `${JSON.stringify({
+        schemaVersion: 1,
+        generatedFrom: { sourceRoot: f.sourceRoot },
+        repositories: [{ id: 'held-repo', action: 'CREATE_AND_MOVE', skills: ['held'], agents: [], libs: [] }],
+      }, null, 2)}\n`, 'utf8');
+
+      const result = await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, verify: false });
+      assert.equal(result.status, 'committed');
+      await access(join(f.targetRoot, 'held-repo', 'skills', 'held', 'SKILL.md'));
     });
   } finally {
     await rm(f.root, { recursive: true, force: true });
