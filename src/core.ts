@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
-import { applyEdits, modify, parse } from 'jsonc-parser';
+import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import YAML from 'yaml';
 
 export type VerifyResult = { ok: boolean; command: string; stdout: string; stderr: string };
@@ -24,7 +24,7 @@ async function exists(path: string): Promise<boolean> {
 async function readConfig(path: string): Promise<{ text: string; data: Record<string, unknown> }> {
   if (!(await exists(path))) return { text: '{\n  "$schema": "https://opencode.ai/config.json"\n}\n', data: {} };
   const text = await readFile(path, 'utf8');
-  const errors: unknown[] = [];
+  const errors: ParseError[] = [];
   const data = parse(text, errors, { allowTrailingComma: true }) as Record<string, unknown>;
   if (errors.length) throw new Error(`OpenCode config is not valid JSON/JSONC: ${path}`);
   return { text, data: data ?? {} };
