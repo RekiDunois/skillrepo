@@ -31,6 +31,8 @@ function readinessRepo(repo: RepoAudit): RepoAudit {
 export async function auditMigrationCommitReadiness(options: {
   planPath: string;
   targetRoot: string;
+  gitPath?: string;
+  env?: NodeJS.ProcessEnv;
 }): Promise<MigrationAuditResult> {
   const raw = await auditMigrationRepos(options);
   const repositories = raw.repositories.map(readinessRepo);
