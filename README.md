@@ -73,3 +73,14 @@ npm test
 ```
 
 GitHub Actions additionally installs the real OpenCode CLI, registers a fixture repository, and verifies discovery through OpenCode itself.
+
+## Skill and agent development
+
+The `skill-development-location` skill defines the safe workflow for changing an OpenCode skill or agent that may be stored outside the default config directory. Load it before development; its locator reads the configured source paths and returns the unique real file path, source root, and Git state:
+
+```bash
+node skills/skill-development-location/scripts/locate-resource.mjs \
+  --kind skill --name <skill-name>
+```
+
+It also documents parallel work ownership, Conventional Commit rules, staged-diff checks, and the push/PR handoff.
