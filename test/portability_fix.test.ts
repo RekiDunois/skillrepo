@@ -3,18 +3,19 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { applyMigrationPortabilityFixes } from '../src/portability_fix.js';
 
 const execFileAsync = promisify(execFile);
 
-async function buildFixture(root: string): Promise<{ targetRoot: string; repo: string; plan: string }> {
+async function buildFixture(root: string): Promise<{ targetRoot: string; repo: string; plan: string; sourceRoot: string }> {
   const targetRoot = join(root, 'repos');
   const repo = join(targetRoot, 'portable-repo');
   const plan = join(root, 'migration-plan.json');
-  const sourceRoot = '/Users/example/.config/opencode';
+  const sourceRoot = join(homedir(), '.config', 'opencode');
+  const server = join(sourceRoot, 'skill', 'tool', 'scripts', 'server.sh');
 
   await mkdir(join(repo, 'skills', 'demo'), { recursive: true });
   await mkdir(join(repo, 'skills', 'block'), { recursive: true });
@@ -42,9 +43,9 @@ async function buildFixture(root: string): Promise<{ targetRoot: string; repo: s
       'name: demo',
       'mcp:',
       '  demo:',
-      '    command: ["/Users/example/.config/opencode/skill/tool/scripts/server.sh", "--stdio"]',
+      `    command: [${JSON.stringify(server)}, "--stdio"]`,
       '---',
-      'Legacy docs: `/Users/example/.config/opencode/skill/tool/scripts/server.sh`.',
+      `Legacy docs: \`${server}\`.`,
       '',
     ].join('\n'),
     'utf8',
@@ -57,7 +58,7 @@ async function buildFixture(root: string): Promise<{ targetRoot: string; repo: s
       'mcp:',
       '  demo:',
       '    command:',
-      '      - /Users/example/.config/opencode/skill/tool/scripts/server.sh',
+      `      - ${server}`,
       '      - --block',
       '---',
       'Body.',
@@ -66,10 +67,10 @@ async function buildFixture(root: string): Promise<{ targetRoot: string; repo: s
     'utf8',
   );
   await writeFile(join(repo, 'skills', 'tool', 'scripts', 'server.sh'), '#!/usr/bin/env bash\n', 'utf8');
-  await writeFile(join(repo, 'tests', 'test_path.py'), 'FIXTURE = "/Users/example/project/input.pdf"\n', 'utf8');
-  await writeFile(join(repo, 'runtime.py'), 'ROOT = "/Users/example/project/runtime"\n', 'utf8');
+  await writeFile(join(repo, 'tests', 'test_path.py'), `FIXTURE = ${JSON.stringify(join(homedir(), 'project', 'input.pdf'))}\n`, 'utf8');
+  await writeFile(join(repo, 'runtime.py'), `ROOT = ${JSON.stringify(join(homedir(), 'project', 'runtime'))}\n`, 'utf8');
 
-  return { targetRoot, repo, plan };
+  return { targetRoot, repo, plan, sourceRoot };
 }
 
 test('portability fix rewrites only provably safe repo commands and migrated docs', async () => {
@@ -110,14 +111,14 @@ test('portability fix rewrites only provably safe repo commands and migrated doc
       /command: \["skillrepo","exec","portable-repo","skills\/tool\/scripts\/server\.sh","--stdio"\]/,
     );
     assert.match(afterDemo, /~\/\.config\/opencode\/skill\/tool\/scripts\/server\.sh/);
-    assert.equal(afterDemo.includes('/Users/example/'), false);
+    assert.equal(afterDemo.includes(fixture.sourceRoot), false);
 
     const afterBlock = await readFile(block, 'utf8');
     assert.match(
       afterBlock,
       /command: \["skillrepo","exec","portable-repo","skills\/tool\/scripts\/server\.sh","--block"\]/,
     );
-    assert.equal(afterBlock.includes('/Users/example/'), false);
+    assert.equal(afterBlock.includes(fixture.sourceRoot), false);
 
     assert.equal(await readFile(testFile, 'utf8'), beforeTest, 'test fixture must remain manual');
     assert.equal(await readFile(runtime, 'utf8'), beforeRuntime, 'runtime code must remain manual');
@@ -157,7 +158,7 @@ test('portability fix CLI is dry-run by default and exposes JSON plan', async ()
     assert.equal(stderr, '');
     const parsed = JSON.parse(stdout) as {
       dryRun: boolean;
-      summary: { autoActions: number; manualActions: number; changedFiles: number };
+      summary: { files: number; autoActions: number; manualActions: number; changedFiles: number };
     };
     assert.equal(parsed.dryRun, true);
     assert.deepEqual(parsed.summary, { files: 4, autoActions: 3, manualActions: 2, changedFiles: 2 });
