@@ -8,10 +8,12 @@
 
 # Version-control metadata from nested third-party repositories.
 **/.git/
+**/.git
 **/.hg/
 **/.svn/
 
-# Dependency trees, interpreter caches, and local model/data caches. Keep manifests/lockfiles.
+# Dependency trees, interpreter caches, local model/data caches, and browser downloads.
+# Keep manifests/lockfiles so dependencies can be reconstructed.
 **/node_modules/
 **/__pycache__/
 **/*.py[cod]
@@ -23,6 +25,7 @@
 **/venv/
 **/local_cache/
 **/local-cache/
+**/.ms-playwright/
 
 # Runtime browser profiles are local state and may contain cookies, history,
 # saved login data, extension state, and other account/session material.
