@@ -1,4 +1,4 @@
-import { access, readFile, writeFile } from 'node:fs/promises';
+import { lstat, open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { auditMigrationRepos } from './audit.js';
@@ -39,22 +39,19 @@ const SAFE_AUTO_IGNORE_PATTERNS = new Set([
   '*-debug.log*',
 ]);
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path, constants.F_OK);
-    return true;
-  } catch {
-    return false;
-  }
+function errnoCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && 'code' in error ? String((error as NodeJS.ErrnoException).code) : undefined;
 }
 
-function existingPatterns(text: string): Set<string> {
-  return new Set(
-    text
-      .split(/\r?\n/)
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('#')),
-  );
+function existingPatterns(text: string): { patterns: Set<string>; hasNegation: boolean } {
+  const rules = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith('#'));
+  return {
+    patterns: new Set(rules),
+    hasNegation: rules.some(line => line.startsWith('!')),
+  };
 }
 
 function appendPatterns(existing: string, patterns: string[]): string {
@@ -62,6 +59,39 @@ function appendPatterns(existing: string, patterns: string[]): string {
   const prefix = existing.length === 0 || existing.endsWith('\n') ? existing : `${existing}\n`;
   const spacer = prefix.length === 0 || prefix.endsWith('\n\n') ? '' : '\n';
   return `${prefix}${spacer}# skillrepo: generated runtime/cache ignores\n${patterns.join('\n')}\n`;
+}
+
+async function readGitignore(path: string): Promise<{ exists: boolean; text: string }> {
+  let info;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    if (errnoCode(error) === 'ENOENT') return { exists: false, text: '' };
+    throw error;
+  }
+  if (!info.isFile()) throw new Error(`Refusing to use non-regular .gitignore: ${path}`);
+
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error(`Refusing to use non-regular .gitignore: ${path}`);
+    return { exists: true, text: await handle.readFile({ encoding: 'utf8' }) };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function writeGitignore(path: string, text: string, existed: boolean): Promise<void> {
+  const noFollow = constants.O_NOFOLLOW ?? 0;
+  const flags = existed
+    ? constants.O_WRONLY | constants.O_TRUNC | noFollow
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow;
+  const handle = await open(path, flags, 0o666);
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error(`Refusing to write non-regular .gitignore: ${path}`);
+    await handle.writeFile(text, { encoding: 'utf8' });
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function applyMigrationIgnores(options: {
@@ -76,16 +106,16 @@ export async function applyMigrationIgnores(options: {
   for (const repo of audit.repositories) {
     if (!repo.exists) continue;
     const gitignorePath = join(repo.repoPath, '.gitignore');
-    const current = await exists(gitignorePath) ? await readFile(gitignorePath, 'utf8') : '';
-    const present = existingPatterns(current);
+    const current = await readGitignore(gitignorePath);
+    const present = existingPatterns(current.text);
     const patterns = repo.ignoreCandidates
       .map(candidate => candidate.pattern)
-      .filter(pattern => SAFE_AUTO_IGNORE_PATTERNS.has(pattern) && !present.has(pattern))
+      .filter(pattern => SAFE_AUTO_IGNORE_PATTERNS.has(pattern) && (present.hasNegation || !present.patterns.has(pattern)))
       .sort();
 
     if (!patterns.length) continue;
     repositories.push({ repoId: repo.repoId, repoPath: repo.repoPath, gitignorePath, patterns });
-    if (!dryRun) await writeFile(gitignorePath, appendPatterns(current, patterns), 'utf8');
+    if (!dryRun) await writeGitignore(gitignorePath, appendPatterns(current.text, patterns), current.exists);
   }
 
   return {
