@@ -24,6 +24,24 @@ jobs:
           command -v skillrepo
       - name: Install OpenCode
         run: npm install -g opencode-ai
+      - name: Build external agent symlink regression fixture
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: |
+          set -euo pipefail
+          external="$RUNNER_TEMP/external-agent-repo/agents"
+          mkdir -p "$OPENCODE_CONFIG_DIR/agents" "$external"
+          cat > "$external/symlink-probe-two.md" <<'EOF'
+          ---
+          description: external OpenCode symlink probe
+          mode: subagent
+          ---
+          External probe without an explicit stable name.
+          EOF
+          ln -s "$external" "$OPENCODE_CONFIG_DIR/agents/manual-agent-repo"
+          opencode agent list >/dev/null
+          skillrepo doctor
       - name: Build fixture repo
         shell: bash
         run: |
@@ -40,7 +58,7 @@ jobs:
           cat > "$repo/agents/fixture-worker.md" <<'EOF'
           ---
           name: fixture-worker
-          description: CI fixture agent
+          description: CI fixture agent: unquoted colon regression
           mode: subagent
           ---
           Test fixture.
