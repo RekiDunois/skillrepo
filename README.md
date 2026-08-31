@@ -11,8 +11,8 @@ skillrepo exec <repo-id> <repo-relative-resource> [args...]
 skillrepo doctor
 
 skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume]
-skillrepo migration audit --target-root <dir> [--plan <file>] [--json]
-skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]
+skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]
+skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]
 skillrepo migration portability --target-root <dir> [--plan <file>] [--json]
 skillrepo migration portability fix --target-root <dir> [--plan <file>] [--execute] [--json]
 ```
@@ -85,6 +85,14 @@ Finally, each new repo is registered through the normal `registerRepo` path. Unl
 
 Post-migration Git preparation is intentionally separate from migration itself. None of these commands initializes Git or creates commits.
 
+Commit-readiness has an explicit Git trust boundary:
+
+> skillrepo MAY produce safe ignore suggestions, but MUST NOT interpret effective `.gitignore` semantics itself. Effective-ignore decisions are delegated to the selected Git executable.
+
+`migration audit` and `migration ignore` therefore require a usable Git executable. They preflight Git before reading the migration plan or scanning repositories. By default `git` is resolved from `PATH`; `--git <path>` selects an explicit executable. There is no parser-based fallback that can return `COMMIT-READY: YES` when Git is unavailable.
+
+For ignore probes, skillrepo uses `git check-ignore --no-index` with Git metadata created only in a temporary directory and `GIT_WORK_TREE` pointed at the migrated repository. It never runs `git init` in the migrated target and never creates `<repo>/.git`.
+
 ### Audit
 
 ```bash
@@ -93,7 +101,9 @@ skillrepo migration audit \
   --target-root ~/skill-repos
 ```
 
-The audit is read-only. It reports commit blockers, manual review items, and observed ignore candidates while avoiding secret-value echoing. It does not follow runtime/cache directories such as browser profiles. A local virtual environment no longer blocks commit readiness once the matching safe ignore rule is already present.
+The audit is read-only. It reports commit blockers, manual review items, and observed **effectively unignored** candidates while avoiding secret-value echoing. It does not follow runtime/cache directories such as browser profiles. A local virtual environment no longer blocks commit readiness only when the selected Git implementation confirms that the observed path is ignored.
+
+Git, rather than skillrepo, decides negation/last-match ordering, nested `.gitignore` behavior, escaping, directory-relative patterns, `**`, and other ignore semantics.
 
 ### Safe ignore generation
 
@@ -101,11 +111,13 @@ The audit is read-only. It reports commit blockers, manual review items, and obs
 # dry-run
 skillrepo migration ignore --plan ./migration-plan.json --target-root ~/skill-repos
 
-# apply only reviewed safe runtime/cache patterns
+# create only a brand-new reviewed safe ignore file
 skillrepo migration ignore --plan ./migration-plan.json --target-root ~/skill-repos --execute
 ```
 
 Ignore generation uses an explicit safe-pattern allowlist for runtime/cache noise. It never automatically hides credential/privacy blockers such as `.env`, key material, or session state merely because the audit found them.
+
+For v0, skillrepo **never auto-rewrites an existing `.gitignore`**, including symlinks. Repositories with an existing file and remaining safe suggestions are reported as manual review. If no `.gitignore` exists, `--execute` may create a new file containing only the narrow safe allowlist; every observed candidate path is then re-probed with the selected Git executable. Verification failure is an error and is never reported as a successful fix.
 
 ### Portability review
 
@@ -115,7 +127,7 @@ skillrepo migration portability \
   --target-root ~/skill-repos
 ```
 
-Absolute home-path findings are classified by scope: frontmatter runtime configuration, Markdown body, tests, or runtime code. Mixed Markdown files preserve separate frontmatter/body segments so later fixes do not treat the whole file as runtime configuration.
+Absolute home-path findings are classified by scope: frontmatter runtime configuration, Markdown body, tests, or runtime code. Mixed Markdown files preserve separate frontmatter/body segments so later fixes do not treat the whole file as runtime configuration. Unix home paths and Windows home paths using either `C:\Users\name\...` or `C:/Users/name/...` separators are recognized.
 
 ### Portability fixes
 
@@ -138,7 +150,7 @@ Before applying any `AUTO-REPO-EXEC` rewrite, the CLI verifies that the installe
 
 ## Development
 
-Requires Node.js 22+.
+Requires Node.js 22+ and Git for commit-readiness tests/features.
 
 ```bash
 npm install
