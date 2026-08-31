@@ -170,7 +170,6 @@ function buildOperations(plan: MigrationPlan, sourceRoot: string, targetRoot: st
 
     for (const agent of repo.agents ?? []) {
       assertLeafName(agent, 'agent file');
-      if (!agent.endsWith('.md')) throw new Error(`Agent migration only supports .md files: ${agent}`);
       const relativeSource = join('agents', agent);
       operations.push({
         kind: 'agent',
@@ -310,7 +309,7 @@ async function moveOperation(operation: MoveOperation): Promise<string[]> {
   }
 
   if (operation.kind === 'agent') {
-    await ensureStableAgentName(operation.target);
+    if (operation.target.endsWith('.md')) await ensureStableAgentName(operation.target);
     return [];
   }
   if (operation.kind === 'lib') {
