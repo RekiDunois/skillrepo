@@ -269,14 +269,7 @@ async function ensureStableAgentName(path: string): Promise<void> {
 }
 
 async function subtreeContainsSkill(path: string): Promise<boolean> {
-  const stat = await lstat(path);
-  if (stat.isSymbolicLink() || stat.isFile()) return basename(path) === 'SKILL.md';
-  if (!stat.isDirectory()) return false;
-  for (const entry of await readdir(path, { withFileTypes: true })) {
-    if (entry.name === 'SKILL.md') return true;
-    if (entry.isDirectory() && await subtreeContainsSkill(join(path, entry.name))) return true;
-  }
-  return false;
+  return await lexists(join(path, 'SKILL.md'));
 }
 
 async function createSkillCompatibilityShim(source: string, target: string): Promise<string[]> {
