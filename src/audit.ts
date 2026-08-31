@@ -142,14 +142,14 @@ function sensitivePathFinding(relPath: string): AuditFinding | null {
 function noiseFilePattern(base: string): string | null {
   const lower = base.toLowerCase();
   if (base === '.DS_Store') return '.DS_Store';
-  if (lower === 'thumbs.db') return 'Thumbs.db';
-  if (/\.py[co]$/i.test(base)) return '*.py[cod]';
-  if (/\.log$/i.test(base)) return '*.log';
-  if (/\.(?:tmp|temp)$/i.test(base)) return '*.tmp';
-  if (/\.(?:swp|swo)$/i.test(base)) return '*.swp';
+  if (lower === 'thumbs.db') return base;
+  if (/\.py[co]$/i.test(base)) return `*${extname(base)}`;
+  if (/^(?:npm-debug|yarn-debug|yarn-error|pnpm-debug)\.log/i.test(base)) return base;
+  if (/\.log$/i.test(base)) return `*${extname(base)}`;
+  if (/\.(?:tmp|temp)$/i.test(base)) return `*${extname(base)}`;
+  if (/\.(?:swp|swo)$/i.test(base)) return `*${extname(base)}`;
   if (base === '.coverage') return '.coverage';
-  if (lower === 'coverage.xml') return 'coverage.xml';
-  if (/^(?:npm-debug|yarn-debug|yarn-error|pnpm-debug)\.log/i.test(base)) return '*-debug.log*';
+  if (lower === 'coverage.xml') return base;
   return null;
 }
 
