@@ -68,6 +68,37 @@ test('migration audit is read-only and reports privacy/commit blockers without e
   }
 });
 
+test('browser runtime profiles are pruned as a single ignore candidate', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-audit-browser-profile-'));
+  const targetRoot = join(root, 'repos');
+  const repo = join(targetRoot, 'browser-repo');
+  const plan = join(root, 'migration-plan.json');
+  const profile = join(repo, 'skills', 'chrome-devtools', 'chrome-profile');
+
+  try {
+    await fixturePlan(plan, 'browser-repo');
+    await mkdir(join(profile, 'Default', 'Cache'), { recursive: true });
+    await mkdir(join(profile, 'WasmTtsEngine', 'fixture'), { recursive: true });
+    await writeFile(join(profile, 'Default', 'Cache', 'cache.bin'), 'runtime cache\n', 'utf8');
+    await writeFile(
+      join(profile, 'WasmTtsEngine', 'fixture', 'voices.json'),
+      '{"voice":"sk-' + 'this-is-runtime-profile-data-not-source"}\n',
+      'utf8',
+    );
+
+    const result = await auditMigrationRepos({ planPath: plan, targetRoot });
+    const audited = result.repositories[0]!;
+    assert.deepEqual(audited.findings, [], 'browser profile contents must not be scanned as source files');
+    assert.deepEqual(
+      audited.ignoreCandidates,
+      [{ pattern: 'chrome-profile/', paths: ['skills/chrome-devtools/chrome-profile'] }],
+    );
+    assert.equal(audited.stats.prunedNoiseDirectories, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('existing exact ignore rules suppress observed noise suggestions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-audit-clean-'));
   const targetRoot = join(root, 'repos');
