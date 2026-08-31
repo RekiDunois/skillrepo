@@ -56,6 +56,7 @@ type MinimalMigrationPlan = { schemaVersion: number; repositories: MinimalRepoPl
 type MutableRepoAudit = Omit<RepoAudit, 'ignoreCandidates' | 'readyForInitialCommit'> & {
   ignoreMap: Map<string, Set<string>>;
   existingIgnorePatterns: Set<string>;
+  existingIgnoreHasNegation: boolean;
 };
 
 const BLOCKER_BYTES = 100 * 1024 * 1024;
@@ -118,14 +119,15 @@ function addFinding(audit: MutableRepoAudit, finding: AuditFinding): void {
 }
 
 function addIgnore(audit: MutableRepoAudit, pattern: string, path: string): void {
-  if (audit.existingIgnorePatterns.has(pattern)) return;
+  if (!audit.existingIgnoreHasNegation && audit.existingIgnorePatterns.has(pattern)) return;
   const paths = audit.ignoreMap.get(pattern) ?? new Set<string>();
   paths.add(path);
   audit.ignoreMap.set(pattern, paths);
 }
 
-function parseExistingIgnore(text: string): Set<string> {
-  return new Set(text.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#')));
+function parseExistingIgnore(text: string): { patterns: Set<string>; hasNegation: boolean } {
+  const rules = text.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#'));
+  return { patterns: new Set(rules), hasNegation: rules.some(line => line.startsWith('!')) };
 }
 
 function sensitivePathFinding(relPath: string): AuditFinding | null {
@@ -185,16 +187,36 @@ async function scanTextFile(audit: MutableRepoAudit, relPath: string, path: stri
   try {
     for await (const chunk of stream) {
       const text = `${carry}${chunk}`;
-      if (text.includes('\u0000')) { stream.destroy(); return; }
+      if (text.includes('\u0000')) {
+        stream.destroy();
+        addFinding(audit, { severity: 'review', code: 'content-scan-skipped', path: relPath, detail: 'content scan stopped after detecting NUL/binary data in a text-candidate file' });
+        return;
+      }
       scanTextContent(audit, relPath, text);
       carry = text.slice(-STREAM_SCAN_OVERLAP);
     }
-  } catch { /* path/type checks still apply if content is unreadable */ }
+  } catch {
+    addFinding(audit, { severity: 'review', code: 'content-scan-failed', path: relPath, detail: 'content scan could not read the entire text-candidate file' });
+  }
 }
 
 async function scanEntry(audit: MutableRepoAudit, repoRoot: string, path: string): Promise<void> {
   const entryStat = await lstat(path);
   const relPath = repoRelative(repoRoot, path);
+  const base = basename(path);
+  if (base === '.git') {
+    const rootGit = relPath === '.git';
+    if (rootGit) {
+      addFinding(audit, { severity: 'review', code: 'git-already-initialized', path: relPath, detail: 'repository already contains Git metadata or worktree linkage' });
+    } else {
+      addFinding(audit, { severity: 'blocker', code: 'embedded-git', path: relPath, detail: 'nested Git metadata would create ambiguous provenance or an embedded-repository gitlink' });
+    }
+    if (!entryStat.isDirectory()) {
+      if (entryStat.isSymbolicLink()) audit.stats.symlinks += 1;
+      else if (entryStat.isFile()) { audit.stats.files += 1; audit.stats.bytes += entryStat.size; }
+    } else audit.stats.directories += 1;
+    return;
+  }
   if (entryStat.isSymbolicLink()) {
     audit.stats.symlinks += 1;
     const rawTarget = await readlink(path);
@@ -207,10 +229,6 @@ async function scanEntry(audit: MutableRepoAudit, repoRoot: string, path: string
   if (entryStat.isDirectory()) {
     audit.stats.directories += 1;
     const name = basename(path);
-    if (name === '.git') {
-      addFinding(audit, { severity: relPath === '.git' ? 'review' : 'blocker', code: relPath === '.git' ? 'git-already-initialized' : 'embedded-git', path: relPath, detail: relPath === '.git' ? 'repository already contains Git metadata' : 'nested Git metadata would create ambiguous provenance or an embedded-repository gitlink' });
-      return;
-    }
     const ignorePattern = NOISE_DIRECTORIES.get(name);
     if (ignorePattern) {
       audit.stats.prunedNoiseDirectories += 1;
@@ -224,12 +242,10 @@ async function scanEntry(audit: MutableRepoAudit, repoRoot: string, path: string
   if (!entryStat.isFile()) return;
   audit.stats.files += 1;
   audit.stats.bytes += entryStat.size;
-  const base = basename(path);
   const sensitive = sensitivePathFinding(relPath);
   if (sensitive) addFinding(audit, sensitive);
   const noisePattern = noiseFilePattern(base);
   if (noisePattern) addIgnore(audit, noisePattern, relPath);
-  if (base === '.git' && relPath !== '.git') addFinding(audit, { severity: 'blocker', code: 'embedded-git', path: relPath, detail: 'nested .git file indicates embedded Git metadata or worktree linkage' });
   if (entryStat.size >= BLOCKER_BYTES) addFinding(audit, { severity: 'blocker', code: 'oversize-file', path: relPath, detail: `file is ${(entryStat.size / 1024 / 1024).toFixed(1)} MiB (GitHub hard limit risk)` });
   else if (entryStat.size >= REVIEW_BYTES) addFinding(audit, { severity: 'review', code: 'large-file', path: relPath, detail: `file is ${(entryStat.size / 1024 / 1024).toFixed(1)} MiB; confirm it belongs in source control` });
   if (shouldScanContent(path)) await scanTextFile(audit, relPath, path);
@@ -256,18 +272,24 @@ async function readPlan(planPath: string): Promise<MinimalMigrationPlan> {
 async function auditRepo(repoId: string, targetRoot: string): Promise<RepoAudit> {
   const repoPath = resolve(targetRoot, repoId);
   const repoExists = await exists(repoPath);
-  const mutable: MutableRepoAudit = { repoId, repoPath, exists: repoExists, gitignorePresent: false, stats: { files: 0, directories: 0, symlinks: 0, bytes: 0, prunedNoiseDirectories: 0 }, findings: [], ignoreMap: new Map(), existingIgnorePatterns: new Set() };
+  const mutable: MutableRepoAudit = { repoId, repoPath, exists: repoExists, gitignorePresent: false, stats: { files: 0, directories: 0, symlinks: 0, bytes: 0, prunedNoiseDirectories: 0 }, findings: [], ignoreMap: new Map(), existingIgnorePatterns: new Set(), existingIgnoreHasNegation: false };
   if (!repoExists) addFinding(mutable, { severity: 'blocker', code: 'missing-repository', path: '.', detail: 'planned migrated repository does not exist at the target root' });
   else {
     const rootStat = await lstat(repoPath);
     if (!rootStat.isDirectory()) addFinding(mutable, { severity: 'blocker', code: 'repository-not-directory', path: '.', detail: 'planned repository path is not a directory' });
     else {
       const gitignore = join(repoPath, '.gitignore');
-      if (await exists(gitignore)) { mutable.gitignorePresent = true; mutable.existingIgnorePatterns = parseExistingIgnore(await readFile(gitignore, 'utf8')); }
+      if (await exists(gitignore)) {
+        mutable.gitignorePresent = true;
+        const parsed = parseExistingIgnore(await readFile(gitignore, 'utf8'));
+        mutable.existingIgnorePatterns = parsed.patterns;
+        mutable.existingIgnoreHasNegation = parsed.hasNegation;
+        if (parsed.hasNegation) addFinding(mutable, { severity: 'review', code: 'gitignore-negation-present', path: '.gitignore', detail: 'existing .gitignore contains negation/override rules; effective ignore semantics require review' });
+      }
       for (const entry of await readdir(repoPath, { withFileTypes: true })) await scanEntry(mutable, repoPath, join(repoPath, entry.name));
     }
   }
-  for (const finding of mutable.findings) if (finding.suggestedIgnore && !mutable.existingIgnorePatterns.has(finding.suggestedIgnore)) addIgnore(mutable, finding.suggestedIgnore, finding.path);
+  for (const finding of mutable.findings) if (finding.suggestedIgnore) addIgnore(mutable, finding.suggestedIgnore, finding.path);
   const ignoreCandidates = [...mutable.ignoreMap.entries()].map(([pattern, paths]) => ({ pattern, paths: [...paths].sort() })).sort((left, right) => left.pattern.localeCompare(right.pattern));
   const findings = [...mutable.findings].sort((left, right) => left.severity !== right.severity ? (left.severity === 'blocker' ? -1 : 1) : left.path.localeCompare(right.path) || left.code.localeCompare(right.code));
   return { repoId, repoPath, exists: mutable.exists, gitignorePresent: mutable.gitignorePresent, stats: mutable.stats, findings, ignoreCandidates, readyForInitialCommit: findings.length === 0 && ignoreCandidates.length === 0 };
