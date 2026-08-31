@@ -140,7 +140,7 @@ export async function applyMigrationIgnores(options: {
 
 export function renderMigrationIgnore(result: MigrationIgnoreResult): string {
   const lines = [
-    `Migration ignore ${result.dryRun ? 'dry-run' : 'applied'}: ${result.patterns} auto pattern(s) across ${result.repositories.length} repo(s); ${result.manualRepositories.length} repo(s) require manual review`,
+    `Migration ignore ${result.dryRun ? 'dry-run' : 'applied'}: ${result.patterns} pattern(s) across ${result.repositories.length} repo(s); ${result.manualRepositories.length} repo(s) require manual review`,
   ];
   for (const repo of result.repositories) lines.push(`${repo.repoId}: ${repo.patterns.join(', ')}`);
   for (const repo of result.manualRepositories) {
