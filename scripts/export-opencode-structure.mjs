@@ -16,6 +16,7 @@ const PRUNED_DIRS = new Map([
   ['.cache', 'cache directory'],
   ['.venv', 'virtual environment'],
   ['venv', 'virtual environment'],
+  ['chrome-profile', 'browser runtime profile'],
   ['Cache', 'application/browser cache'],
   ['Code Cache', 'application/browser cache'],
   ['GPUCache', 'application/browser cache'],
@@ -70,6 +71,7 @@ function inside(root, candidate) {
 }
 
 function isSensitiveCandidate(name) {
+  if (/^\.env\.(?:example|sample)$/i.test(name)) return false;
   return SENSITIVE_BASENAME_PATTERNS.some((pattern) => pattern.test(name));
 }
 
@@ -191,7 +193,7 @@ async function main() {
     notes: [
       'File contents are not included.',
       'Symlinks are recorded but never followed.',
-      'Known high-noise cache/dependency/VCS directories are recorded as pruned directory entries without listing their children.',
+      'Known high-noise cache/dependency/VCS/browser-profile directories are recorded as pruned directory entries without listing their children.',
       'Sensitive candidates are based on filenames only; this is not a secret scanner.',
     ],
     summary: {
