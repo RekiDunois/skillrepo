@@ -15,10 +15,11 @@ import { auditMigrationRepos, renderMigrationAudit } from './audit.js';
 import { applyMigrationIgnores, renderMigrationIgnore } from './ignore.js';
 import { applyMigration } from './migration.js';
 import { classifyMigrationPortability, renderMigrationPortability } from './portability.js';
+import { applyMigrationPortabilityFixes, renderMigrationPortabilityFix } from './portability_fix.js';
 import { execRegisteredResource } from './runtime.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--json]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--execute] [--json]`);
   process.exit(2);
 }
 
@@ -136,6 +137,30 @@ async function main(): Promise<void> {
     }
 
     if (subcommand === 'portability') {
+      const [portabilitySubcommand, ...portabilityArgs] = migrationArgs;
+      if (portabilitySubcommand === 'fix') {
+        const { values, positionals } = parseArgs({
+          args: portabilityArgs,
+          allowPositionals: true,
+          allowNegative: true,
+          options: {
+            plan: { type: 'string', default: 'migration-plan.json' },
+            'target-root': { type: 'string' },
+            execute: { type: 'boolean', default: false },
+            json: { type: 'boolean', default: false },
+          },
+        });
+        if (positionals.length || !values['target-root']) usage();
+
+        const result = await applyMigrationPortabilityFixes({
+          planPath: values.plan!,
+          targetRoot: values['target-root'],
+          dryRun: !values.execute,
+        });
+        console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationPortabilityFix(result));
+        return;
+      }
+
       const { values, positionals } = parseArgs({
         args: migrationArgs,
         allowPositionals: true,
