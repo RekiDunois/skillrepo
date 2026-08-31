@@ -1,0 +1,96 @@
+# OpenCode migration-analysis snapshot policy
+#
+# This file is intended to be copied to the SOURCE ROOT as `.gitignore`
+# before creating a gd-sync-harness / knowledge-sync profile.
+#
+# Goal: preserve config, skills, agents, scripts, references, assets, and
+# other human-authored material while dropping obvious local/generated state.
+
+# Version-control metadata from nested third-party repositories.
+**/.git/
+**/.hg/
+**/.svn/
+
+# Dependency trees and interpreter caches. Keep manifests/lockfiles.
+**/node_modules/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.cache/
+**/.venv/
+**/venv/
+
+# Common application/browser caches and crash/runtime state.
+**/Cache/
+**/Code Cache/
+**/GPUCache/
+**/DawnCache/
+**/GrShaderCache/
+**/GraphiteDawnCache/
+**/ShaderCache/
+**/Crashpad/
+**/BrowserMetrics/
+**/blob_storage/
+**/Service Worker/CacheStorage/
+**/Service Worker/ScriptCache/
+**/SingletonCookie
+**/SingletonLock
+**/SingletonSocket
+
+# Browser/session stores that commonly contain account/session data.
+**/Cookies
+**/Cookies-journal
+**/Login Data
+**/Login Data-journal
+**/Web Data
+**/Web Data-journal
+**/Local State
+
+# Local databases / generated state. Migration analysis should use source files,
+# not opaque runtime databases.
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.db
+**/*.db-*
+**/*.db-journal
+**/*.db-wal
+**/*.db-shm
+
+# Obvious credential files. This does NOT protect secrets embedded inside other
+# config/source files, so review the inventory before syncing.
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.sample
+**/credentials.json
+**/credentials.*.json
+**/client_secret*.json
+**/token.json
+**/token.*.json
+**/*service-account*.json
+**/rclone.conf
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# Logs, temp files, editor/OS noise, and obvious backups.
+**/*.log
+**/*.tmp
+**/*.swp
+**/*.swo
+**/*~
+**/*.bak
+**/*.orig
+**/*.rej
+**/.DS_Store
+**/Thumbs.db
+**/backup/
+**/backups/
+
+# Keep the skillrepo inventory in the synchronized snapshot.
+!.skillrepo-inventory/
+!.skillrepo-inventory/**
