@@ -1,4 +1,4 @@
-import { lstat, open } from 'node:fs/promises';
+import { lstat, open, readFile, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { auditMigrationRepos } from './audit.js';
@@ -22,6 +22,12 @@ export type MigrationIgnoreResult = {
   patterns: number;
 };
 
+type CreatedFileProof = {
+  dev: number;
+  ino: number;
+  text: string;
+};
+
 const SAFE_AUTO_IGNORE_PATTERNS = new Set([
   'node_modules/',
   '.venv/',
@@ -35,14 +41,17 @@ const SAFE_AUTO_IGNORE_PATTERNS = new Set([
   '.ms-playwright/',
   'chrome-profile/',
   '.DS_Store',
-  'Thumbs.db',
-  '*.py[cod]',
-  '*.log',
-  '*.tmp',
-  '*.swp',
+  '[Tt][Hh][Uu][Mm][Bb][Ss].[Dd][Bb]',
+  '*.[Pp][Yy][CcOoDd]',
+  '*.[Ll][Oo][Gg]',
+  '*.[Tt][Mm][Pp]',
+  '*.[Tt][Ee][Mm][Pp]',
+  '*.[Ss][Ww][Pp]',
+  '*.[Ss][Ww][Oo]',
   '.coverage',
-  'coverage.xml',
-  '*-debug.log*',
+  '[Cc][Oo][Vv][Ee][Rr][Aa][Gg][Ee].[Xx][Mm][Ll]',
+  '*[Dd][Ee][Bb][Uu][Gg].[Ll][Oo][Gg]*',
+  '[Yy][Aa][Rr][Nn]-[Ee][Rr][Rr][Oo][Rr].[Ll][Oo][Gg]*',
 ]);
 
 function errnoCode(error: unknown): string | undefined {
@@ -67,14 +76,31 @@ function newGitignoreText(patterns: string[]): string {
   return `# skillrepo: generated runtime/cache ignores\n${patterns.join('\n')}\n`;
 }
 
-async function writeNewGitignore(path: string, text: string): Promise<void> {
+async function writeNewGitignore(path: string, text: string): Promise<CreatedFileProof> {
   const noFollow = constants.O_NOFOLLOW ?? 0;
   const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o666);
   try {
-    if (!(await handle.stat()).isFile()) throw new Error(`Refusing to write non-regular .gitignore: ${path}`);
+    const created = await handle.stat();
+    if (!created.isFile()) throw new Error(`Refusing to write non-regular .gitignore: ${path}`);
     await handle.writeFile(text, { encoding: 'utf8' });
+    return { dev: created.dev, ino: created.ino, text };
   } finally {
     await handle.close();
+  }
+}
+
+async function rollbackCreatedGitignore(path: string, proof: CreatedFileProof): Promise<boolean> {
+  try {
+    const before = await lstat(path);
+    if (!before.isFile() || before.isSymbolicLink() || before.dev !== proof.dev || before.ino !== proof.ino) return false;
+    if (await readFile(path, 'utf8') !== proof.text) return false;
+    const after = await lstat(path);
+    if (!after.isFile() || after.isSymbolicLink() || after.dev !== proof.dev || after.ino !== proof.ino) return false;
+    await unlink(path);
+    return true;
+  } catch (error) {
+    if (errnoCode(error) === 'ENOENT') return true;
+    return false;
   }
 }
 
@@ -123,14 +149,25 @@ export async function applyMigrationIgnores(options: {
     repositories.push(plan);
     if (dryRun) continue;
 
-    await writeNewGitignore(gitignorePath, newGitignoreText(patterns));
-    const observedPaths = candidates.flatMap(candidate => candidate.paths);
-    const ignored = await probeIgnoredPaths({ gitPath, env: { ...env } }, repo.repoPath, observedPaths);
-    const missing = observedPaths.filter(path => !ignored.has(path));
-    if (missing.length) {
-      throw new Error(
-        `Created ${gitignorePath}, but Git verification did not ignore all observed paths: ${missing.join(', ')}`,
-      );
+    const text = newGitignoreText(patterns);
+    const proof = await writeNewGitignore(gitignorePath, text);
+    try {
+      const observedPaths = candidates.flatMap(candidate => candidate.paths);
+      const ignored = await probeIgnoredPaths({ gitPath, env: { ...env } }, repo.repoPath, observedPaths);
+      const missing = observedPaths.filter(path => !ignored.has(path));
+      if (missing.length) {
+        throw new Error(
+          `Created ${gitignorePath}, but Git verification did not ignore all observed paths: ${missing.join(', ')}`,
+        );
+      }
+    } catch (error) {
+      const rolledBack = await rollbackCreatedGitignore(gitignorePath, proof);
+      if (!rolledBack) {
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}; rollback was skipped because ${gitignorePath} no longer matched the file/content created by this invocation`,
+        );
+      }
+      throw error;
     }
   }
 
@@ -151,6 +188,6 @@ export function renderMigrationIgnore(result: MigrationIgnoreResult): string {
     lines.push(`[MANUAL] ${repo.repoId}: ${repo.patterns.join(', ')} — ${repo.reason}`);
   }
   if (result.dryRun) lines.push('No .gitignore files were changed. Existing .gitignore files are never auto-rewritten.');
-  else lines.push('Only brand-new .gitignore files were created and verified with Git. Existing .gitignore files and Git metadata were not changed.');
+  else lines.push('Only brand-new .gitignore files were created and verified with Git. Failed verification rolls back an unchanged skillrepo-created file; existing .gitignore files and Git metadata were not changed.');
   return lines.join('\n');
 }
