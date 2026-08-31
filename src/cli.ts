@@ -16,7 +16,7 @@ import { applyMigrationIgnores, renderMigrationIgnore } from './ignore.js';
 import { applyMigration } from './migration.js';
 import { classifyMigrationPortability, renderMigrationPortability } from './portability.js';
 import { applyMigrationPortabilityFixes, renderMigrationPortabilityFix } from './portability_fix.js';
-import { execRegisteredResource } from './runtime.js';
+import { execRegisteredResource, installedSkillrepoSupportsExec } from './runtime.js';
 
 function usage(): never {
   console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--execute] [--json]`);
@@ -152,11 +152,26 @@ async function main(): Promise<void> {
         });
         if (positionals.length || !values['target-root']) usage();
 
-        const result = await applyMigrationPortabilityFixes({
+        const preview = await applyMigrationPortabilityFixes({
           planPath: values.plan!,
           targetRoot: values['target-root'],
-          dryRun: !values.execute,
+          dryRun: true,
         });
+        let result = preview;
+        if (values.execute) {
+          const needsRuntimeExec = preview.files.some(file => file.actions.some(action => action.kind === 'AUTO-REPO-EXEC'));
+          if (needsRuntimeExec && !(await installedSkillrepoSupportsExec())) {
+            throw new Error(
+              'Portability fix requires the current skillrepo CLI installed on PATH before rewriting MCP commands. '
+              + 'Install this package globally, then re-run the same command.',
+            );
+          }
+          result = await applyMigrationPortabilityFixes({
+            planPath: values.plan!,
+            targetRoot: values['target-root'],
+            dryRun: false,
+          });
+        }
         console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationPortabilityFix(result));
         return;
       }
