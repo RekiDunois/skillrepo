@@ -14,7 +14,7 @@ import {
 import { applyMigration } from './migration.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--no-verify]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]`);
   process.exit(2);
 }
 
@@ -89,6 +89,7 @@ async function main(): Promise<void> {
         plan: { type: 'string', default: 'migration-plan.json' },
         'target-root': { type: 'string' },
         execute: { type: 'boolean', default: false },
+        resume: { type: 'boolean', default: false },
         verify: { type: 'boolean', default: true },
       },
     });
@@ -98,19 +99,36 @@ async function main(): Promise<void> {
       planPath: values.plan!,
       targetRoot: values['target-root'],
       dryRun: !values.execute,
+      resume: values.resume,
       verify: values.verify,
     });
 
     if (result.dryRun) {
-      console.log(`Migration dry-run: ${result.moves.length} move(s) into ${result.repositories.length} repo(s)`);
+      if (values.resume) {
+        console.log(
+          `Migration resume dry-run: ${result.moves.length} planned move(s), `
+          + `${result.resumedMoves.length} already moved, `
+          + `${result.moves.length - result.resumedMoves.length} pending into ${result.repositories.length} repo(s)`,
+        );
+      } else {
+        console.log(`Migration dry-run: ${result.moves.length} move(s) into ${result.repositories.length} repo(s)`);
+      }
       for (const move of result.moves) {
-        console.log(`  ${move.kind}: ${move.source} -> ${move.target}`);
+        const resumed = result.resumedMoves.some(item => item.target === move.target);
+        console.log(`  ${resumed ? 'already-moved' : move.kind}: ${move.source} -> ${move.target}`);
       }
       console.log('No files were moved. Re-run with --execute only after reviewing this output.');
       return;
     }
 
-    console.log(`Migration applied: ${result.moves.length} move(s) into ${result.repositories.length} repo(s)`);
+    if (values.resume) {
+      console.log(
+        `Migration resumed: ${result.moves.length} planned move(s), `
+        + `${result.resumedMoves.length} already moved into ${result.repositories.length} repo(s)`,
+      );
+    } else {
+      console.log(`Migration applied: ${result.moves.length} move(s) into ${result.repositories.length} repo(s)`);
+    }
     console.log(`Compatibility paths: ${result.compatibilityPaths.length}`);
     if (result.verification.length && !printVerification(result.verification)) {
       throw new Error('OpenCode verification failed after migration. Run skillrepo doctor for details.');
