@@ -91,7 +91,7 @@ Commit-readiness has an explicit Git trust boundary:
 
 Commands that consume the commit-readiness audit oracle (`migration audit`, `migration ignore`, `migration portability`, and `migration portability fix`) require a usable Git executable and accept the same `--git <path>` selector. They preflight the selected Git before repository scanning. By default `git` is resolved from `PATH`. There is no parser-based fallback that can return `COMMIT-READY: YES` when Git is unavailable.
 
-For ignore probes, skillrepo uses `git check-ignore --no-index` with Git metadata created only in a temporary directory and `GIT_WORK_TREE` pointed at the migrated repository. It never runs `git init` in the migrated target and never creates `<repo>/.git`.
+For ignore probes, skillrepo uses `git check-ignore --no-index`. If the migrated target already has valid Git worktree metadata, the probe runs in that repository's real Git context so repository-local excludes such as `.git/info/exclude` and local ignore configuration are honored. Only uninitialized targets use temporary Git metadata with `GIT_WORK_TREE` pointed at the migrated repository. Skillrepo never runs `git init` in the migrated target and never creates `<repo>/.git` itself.
 
 ### Audit
 
@@ -103,7 +103,7 @@ skillrepo migration audit \
 
 The audit is read-only. It reports commit blockers, manual review items, and observed **effectively unignored** candidates while avoiding secret-value echoing. It does not follow runtime/cache directories such as browser profiles. A local virtual environment no longer blocks commit readiness only when the selected Git implementation confirms that the observed path is ignored.
 
-Git, rather than skillrepo, decides negation/last-match ordering, nested `.gitignore` behavior, escaping, directory-relative patterns, `**`, and other ignore semantics.
+Git, rather than skillrepo, decides negation/last-match ordering, nested `.gitignore` behavior, escaping, directory-relative patterns, `**`, repository-local exclude sources, and other ignore semantics.
 
 ### Safe ignore generation
 
