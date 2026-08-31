@@ -49,6 +49,10 @@ function errnoCode(error: unknown): string | undefined {
   return error && typeof error === 'object' && 'code' in error ? String((error as NodeJS.ErrnoException).code) : undefined;
 }
 
+function comparePatterns(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 async function gitignoreExists(path: string): Promise<boolean> {
   try {
     await lstat(path);
@@ -100,7 +104,7 @@ export async function applyMigrationIgnores(options: {
     const gitignorePath = join(repo.repoPath, '.gitignore');
     const candidates = repo.ignoreCandidates
       .filter(candidate => SAFE_AUTO_IGNORE_PATTERNS.has(candidate.pattern))
-      .sort((left, right) => left.pattern.localeCompare(right.pattern));
+      .sort((left, right) => comparePatterns(left.pattern, right.pattern));
     const patterns = candidates.map(candidate => candidate.pattern);
     if (!patterns.length) continue;
 
