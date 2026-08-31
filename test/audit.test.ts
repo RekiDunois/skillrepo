@@ -29,6 +29,7 @@ test('migration audit is read-only and reports privacy/commit blockers without e
     await mkdir(join(repo, 'skills', 'demo'), { recursive: true });
     await mkdir(join(repo, '.venv', 'bin'), { recursive: true });
     await mkdir(join(repo, 'vendor', 'embedded', '.git'), { recursive: true });
+    await mkdir(join(targetRoot, 'outside'), { recursive: true });
     await writeFile(join(repo, 'skills', 'demo', 'SKILL.md'), '---\nname: demo\ndescription: demo\n---\n', 'utf8');
     await writeFile(join(repo, '.env'), `AWS_ACCESS_KEY_ID=${fakeSecret}\n`, 'utf8');
     await writeFile(join(repo, '.venv', 'bin', 'python'), 'local-runtime\n', 'utf8');
