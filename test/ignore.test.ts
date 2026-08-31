@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { applyMigrationIgnores, renderMigrationIgnore } from '../src/ignore.js';
 
 async function writePlan(path: string): Promise<void> {
@@ -14,6 +15,21 @@ async function writePlan(path: string): Promise<void> {
       { id: 'active-repo', action: 'CREATE_AND_MOVE', skills: [], agents: [], libs: [] },
     ],
   }, null, 2)}\n`, 'utf8');
+}
+
+async function locateGit(): Promise<string> {
+  const names = process.platform === 'win32' ? ['git.exe', 'git.cmd', 'git.bat'] : ['git'];
+  for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+    for (const name of names) {
+      const candidate = join(dir, name);
+      try { await access(candidate, constants.X_OK); return candidate; } catch { /* keep searching */ }
+    }
+  }
+  throw new Error('Git executable not found on test PATH');
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 async function makeNoise(repo: string): Promise<void> {
@@ -92,6 +108,108 @@ test('migration ignore creates and verifies a brand-new gitignore from safe obse
     assert.equal(second.repositories.length, 0);
     assert.equal(second.manualRepositories.length, 0, 'all observed safe paths are already ignored according to Git');
     assert.equal(await readFile(gitignore, 'utf8'), text);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('generated file-noise patterns cover every concrete observed path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-ignore-exact-patterns-'));
+  const targetRoot = join(root, 'repos');
+  const repo = join(targetRoot, 'active-repo');
+  const plan = join(root, 'migration-plan.json');
+  const gitignore = join(repo, '.gitignore');
+
+  try {
+    await writePlan(plan);
+    await mkdir(repo, { recursive: true });
+    for (const name of ['scratch.temp', 'editor.swo', 'yarn-error.log', 'thumbs.db', 'COVERAGE.XML']) {
+      await writeFile(join(repo, name), 'runtime noise\n', 'utf8');
+    }
+
+    const dryRun = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: true });
+    assert.equal(dryRun.repositories.length, 1);
+    assert.deepEqual(
+      [...dryRun.repositories[0]!.patterns].sort(),
+      ['*.swo', '*.temp', 'COVERAGE.XML', 'thumbs.db', 'yarn-error.log'].sort(),
+    );
+
+    await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false });
+    const text = await readFile(gitignore, 'utf8');
+    for (const pattern of ['*.temp', '*.swo', 'yarn-error.log', 'thumbs.db', 'COVERAGE.XML']) {
+      assert.ok(text.split(/\r?\n/).includes(pattern), `expected exact safe pattern ${pattern}`);
+    }
+    const second = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false });
+    assert.equal(second.patterns, 0, 'Git must confirm every concrete observed path is ignored after creation');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('verification failure removes only the unchanged gitignore created by this invocation', async t => {
+  if (process.platform === 'win32') { t.skip('shell wrapper fixture is POSIX-only'); return; }
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-ignore-rollback-'));
+  const targetRoot = join(root, 'repos');
+  const repo = join(targetRoot, 'active-repo');
+  const plan = join(root, 'migration-plan.json');
+  const gitignore = join(repo, '.gitignore');
+  const fakeGit = join(root, 'git');
+
+  try {
+    const realGit = await locateGit();
+    await writePlan(plan);
+    await mkdir(repo, { recursive: true });
+    await writeFile(join(repo, 'debug.log'), 'runtime noise\n', 'utf8');
+    await writeFile(fakeGit, [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then echo "git version 2.0.0"; exit 0; fi',
+      `if [ "$1" = "init" ]; then exec ${shellQuote(realGit)} "$@"; fi`,
+      'cat >/dev/null',
+      'exit 1',
+      '',
+    ].join('\n'), 'utf8');
+    await chmod(fakeGit, 0o755);
+
+    await assert.rejects(
+      applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false, gitPath: fakeGit }),
+      /Git verification did not ignore all observed paths/,
+    );
+    await assert.rejects(access(gitignore), 'failed verification must roll back the unchanged file created by skillrepo');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('verification rollback never deletes a concurrently edited gitignore', async t => {
+  if (process.platform === 'win32') { t.skip('shell wrapper fixture is POSIX-only'); return; }
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-ignore-rollback-edit-'));
+  const targetRoot = join(root, 'repos');
+  const repo = join(targetRoot, 'active-repo');
+  const plan = join(root, 'migration-plan.json');
+  const gitignore = join(repo, '.gitignore');
+  const fakeGit = join(root, 'git');
+
+  try {
+    const realGit = await locateGit();
+    await writePlan(plan);
+    await mkdir(repo, { recursive: true });
+    await writeFile(join(repo, 'debug.log'), 'runtime noise\n', 'utf8');
+    await writeFile(fakeGit, [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then echo "git version 2.0.0"; exit 0; fi',
+      `if [ "$1" = "init" ]; then exec ${shellQuote(realGit)} "$@"; fi`,
+      'cat >/dev/null',
+      'if [ -f "$GIT_WORK_TREE/.gitignore" ]; then printf "# user edit\\n" >> "$GIT_WORK_TREE/.gitignore"; fi',
+      'exit 1',
+      '',
+    ].join('\n'), 'utf8');
+    await chmod(fakeGit, 0o755);
+
+    await assert.rejects(
+      applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false, gitPath: fakeGit }),
+      /rollback was skipped because .* no longer matched/,
+    );
+    assert.match(await readFile(gitignore, 'utf8'), /# user edit/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
