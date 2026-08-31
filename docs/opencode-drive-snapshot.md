@@ -1,13 +1,13 @@
-# OpenCode migration snapshot via drive-sync-harness
+# OpenCode migration snapshot via a Drive sync CLI
 
 This workflow creates a stable Google Drive snapshot of an existing OpenCode config tree for migration analysis.
 
-The `drive-sync-harness` repository builds the `sync-cli` CLI. Its profile source root is treated as the logical Gitignore root even when the source is not a Git repository. Root and nested `.gitignore` files are captured into a committed synchronization-policy snapshot. Global Git excludes and `.git/info/exclude` are not used.
+The examples below use `<sync-cli>` as a placeholder for the Drive synchronization CLI used in your environment. Its profile source root is treated as the logical Gitignore root even when the source is not a Git repository. Root and nested `.gitignore` files are captured into a synchronization-policy snapshot. Global Git excludes and `.git/info/exclude` are not used.
 
-Important behavior:
+Important behavior expected from the sync CLI:
 
-- `sync-cli profile add` captures the current `.gitignore` policy before the first synchronization is queued.
-- Changing `.gitignore` later does not immediately change the active policy; use `sync-cli profile ignore update <profile>`.
+- `<sync-cli> profile add` captures the current `.gitignore` policy before the first synchronization is queued.
+- Changing `.gitignore` later does not immediately change the active policy; use the CLI's profile-ignore refresh command.
 - Local symlinks are skipped by the synchronization scan. They are not followed.
 - `profile add` creates an enabled, ongoing synchronization profile. For migration analysis, disable it after the first ready state to freeze the Drive snapshot.
 
@@ -62,15 +62,15 @@ The exporter does not read file contents. Known noisy VCS/dependency/cache direc
 
 Before continuing, inspect `structure.json`:
 
-- If `summary.externalSymlinks` is greater than zero, stop and decide how those targets should be captured. `sync-cli` will not upload the symlink targets through the source link.
+- If `summary.externalSymlinks` is greater than zero, stop and decide how those targets should be captured. The sync CLI may not upload symlink targets through the source link.
 - Review `sensitive-paths.txt`. It is only a filename heuristic and is not proof that the remaining files contain no secrets.
 
 ## 3. Create the Google Drive snapshot profile
 
-Use a dedicated profile ID and remote path for this migration snapshot. Example placeholders:
+Use a dedicated profile ID and remote path for this migration snapshot. Adapt the following placeholder command to your sync CLI:
 
 ```bash
-sync-cli profile add \
+<sync-cli> profile add \
   opencode-migration-snapshot \
   ~/.config/opencode \
   <remote> \
@@ -79,37 +79,25 @@ sync-cli profile add \
   --wait
 ```
 
-`--wait` waits until the worker-owned initial synchronization reaches `ready`.
+`--wait` should wait until the worker-owned initial synchronization reaches `ready`.
 
-Because the `.gitignore` was installed before `profile add`, the first upload uses the intended policy snapshot. There is no need to run `profile ignore update` for the initial snapshot.
+Because the `.gitignore` was installed before `profile add`, the first upload uses the intended policy snapshot. There is no need to refresh the ignore policy for the initial snapshot.
 
 ## 4. Verify the synchronized state
 
-```bash
-sync-cli profile ignore status opencode-migration-snapshot
-sync-cli profile status opencode-migration-snapshot
-```
+Use your sync CLI's profile status and ignore-policy status commands for `opencode-migration-snapshot`.
 
 The ignore status should report the current disk snapshot as clean and the policy refresh as ready. The profile should reach the ready state without a terminal error.
 
 ## 5. Freeze the snapshot
 
-Once the initial upload is ready:
-
-```bash
-sync-cli profile disable opencode-migration-snapshot
-```
+Once the initial upload is ready, disable the profile using your sync CLI.
 
 Disabling stops the profile jobs while keeping the remote data. This gives migration analysis a stable Drive snapshot even if the local OpenCode tree changes later.
 
 ## If the ignore policy changes after profile creation
 
-Prefer deciding the migration `.gitignore` before `profile add`. If it must change while the profile is still being used:
-
-```bash
-sync-cli profile ignore update opencode-migration-snapshot
-sync-cli profile wait opencode-migration-snapshot
-```
+Prefer deciding the migration `.gitignore` before `profile add`. If it must change while the profile is still being used, refresh the profile's ignore policy and wait for the profile to become ready again.
 
 Do not assume a policy change retroactively cleans every object that may already have been uploaded under an older policy. For a clean migration snapshot, finalizing the policy before first synchronization is safer.
 

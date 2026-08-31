@@ -1,4 +1,33 @@
 node_modules/
 dist/
+*.tgz
 *.log
 .DS_Store
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.netrc
+.npmrc
+.pypirc
+credentials*.json
+service-account*.json
+token*.json
+cookies*.json
+storage-state*.json
+auth-state*.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+
+# Local migration/audit artifacts
+migration-plan.json
+audit.json
+audit-*.json
+.skillrepo-inventory/
