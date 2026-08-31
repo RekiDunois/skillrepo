@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
-import YAML from 'yaml';
+import { parseFrontmatter } from './frontmatter.js';
 
 export type VerifyResult = { ok: boolean; command: string; stdout: string; stderr: string };
 export type RepoInventory = {
@@ -102,9 +102,7 @@ function repoId(repoPath: string): string {
 }
 
 function frontmatter(text: string): Record<string, unknown> {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
-  if (!match) return {};
-  return (YAML.parse(match[1]) ?? {}) as Record<string, unknown>;
+  return parseFrontmatter(text).data;
 }
 
 async function walkFiles(root: string): Promise<string[]> {
@@ -534,7 +532,7 @@ async function doctorStaticIssues(): Promise<string[]> {
           issues.push(`Broken agent symlink: ${path} -> ${target}`);
           continue;
         }
-        const result = await collectAgentNames(target, true);
+        const result = await collectAgentNames(target, false);
         issues.push(...result.issues);
         for (const name of result.names) {
           const previous = seenAgents.get(name);
