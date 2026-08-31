@@ -1,8 +1,9 @@
-import { access, lstat, mkdir, readFile, readdir, readlink, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, readdir, readlink, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { constants, existsSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { parseFrontmatter } from './frontmatter.js';
 
@@ -16,6 +17,25 @@ export type RepoInventory = {
 };
 
 type RegistrationState = { skillsRegistered: boolean; agentsRegistered: boolean };
+
+export type OpenCodeConfigSnapshot = {
+  path: string;
+  existed: boolean;
+  text: string;
+  fingerprint: string;
+  mode?: number;
+  identity?: { dev: number; ino: number };
+};
+
+export type RegistrationPlan = {
+  configPath: string;
+  skillSources: string[];
+  addedSkillSources: string[];
+  agentLinks: Array<{ path: string; target: string }>;
+};
+
+const ABSENT_FINGERPRINT = 'absent';
+const EMPTY_CONFIG_TEXT = '{\n  "$schema": "https://opencode.ai/config.json"\n}\n';
 
 export function opencodeConfigDir(env = process.env): string {
   return resolve(env.OPENCODE_CONFIG_DIR ?? join(homedir(), '.config', 'opencode'));
@@ -56,6 +76,14 @@ async function lexists(path: string): Promise<boolean> {
   }
 }
 
+async function tryLstat(path: string) {
+  try {
+    return await lstat(path);
+  } catch {
+    return undefined;
+  }
+}
+
 async function directoryExists(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isDirectory();
@@ -64,9 +92,25 @@ async function directoryExists(path: string): Promise<boolean> {
   }
 }
 
+export function fingerprintText(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+async function fileFingerprint(path: string): Promise<string> {
+  const pathStat = await tryLstat(path);
+  if (!pathStat) return ABSENT_FINGERPRINT;
+  if (pathStat.isSymbolicLink()) throw new Error(`Refusing to replace symlinked OpenCode config: ${path}`);
+  if (!pathStat.isFile()) throw new Error(`OpenCode config path is not a file: ${path}`);
+  return fingerprintText(await readFile(path, 'utf8'));
+}
+
+function fileIdentity(pathStat: Awaited<ReturnType<typeof lstat>>): { dev: number; ino: number } {
+  return { dev: Number(pathStat.dev), ino: Number(pathStat.ino) };
+}
+
 async function readConfig(path: string): Promise<{ text: string; data: Record<string, unknown> }> {
   if (!(await exists(path))) {
-    return { text: '{\n  "$schema": "https://opencode.ai/config.json"\n}\n', data: {} };
+    return { text: EMPTY_CONFIG_TEXT, data: {} };
   }
   const text = await readFile(path, 'utf8');
   const errors: ParseError[] = [];
@@ -75,30 +119,161 @@ async function readConfig(path: string): Promise<{ text: string; data: Record<st
   return { text, data: data ?? {} };
 }
 
+export async function readOpenCodeConfigSnapshot(configInput?: string): Promise<OpenCodeConfigSnapshot> {
+  const path = resolve(configInput ?? opencodeConfigFile());
+  const pathStat = await tryLstat(path);
+  if (pathStat?.isSymbolicLink()) throw new Error(`Refusing to use symlinked OpenCode config: ${path}`);
+  if (pathStat && !pathStat.isFile()) throw new Error(`OpenCode config path is not a file: ${path}`);
+
+  const { text } = await readConfig(path);
+  // Parse here as well as in readConfig so a caller gets one immutable snapshot
+  // and cannot accidentally pair data from one config version with another.
+  return {
+    path,
+    existed: Boolean(pathStat),
+    text,
+    fingerprint: pathStat ? fingerprintText(text) : ABSENT_FINGERPRINT,
+    mode: pathStat?.mode,
+    identity: pathStat ? fileIdentity(pathStat) : undefined,
+  };
+}
+
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
 async function updateSkills(configPath: string, updater: (skills: string[]) => string[]): Promise<void> {
-  const existed = await exists(configPath);
-  const { text, data } = await readConfig(configPath);
+  const snapshot = await readOpenCodeConfigSnapshot(configPath);
+  const { data } = await readConfig(configPath);
   const current = stringArray(data.skills);
   const next = updater(current);
 
   if (current.length === next.length && current.every((value, index) => value === next[index])) return;
-  if (!existed && next.length === 0) return;
+  if (!snapshot.existed && next.length === 0) return;
 
-  const edits = modify(text, ['skills'], next, {
+  const baseText = snapshot.existed ? snapshot.text : EMPTY_CONFIG_TEXT;
+  const edits = modify(baseText, ['skills'], next, {
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
   });
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(configPath, applyEdits(text, edits), 'utf8');
+  await writeOpenCodeConfigAtomically(snapshot, applyEdits(baseText, edits));
+}
+
+function configTextWithSkills(snapshot: OpenCodeConfigSnapshot, skills: string[]): string {
+  const baseText = snapshot.existed ? snapshot.text : EMPTY_CONFIG_TEXT;
+  const errors: ParseError[] = [];
+  const parsed = parse(baseText, errors, { allowTrailingComma: true });
+  if (errors.length || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`OpenCode config is not valid JSON/JSONC: ${snapshot.path}`);
+  }
+
+  const edits = modify(baseText, ['skills'], skills, {
+    formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
+  });
+  const nextText = applyEdits(baseText, edits);
+  const nextErrors: ParseError[] = [];
+  parse(nextText, nextErrors, { allowTrailingComma: true });
+  if (nextErrors.length) throw new Error(`Generated OpenCode config is not valid JSON/JSONC: ${snapshot.path}`);
+  return nextText;
+}
+
+export function prospectiveOpenCodeConfig(
+  snapshot: OpenCodeConfigSnapshot,
+  skillSources: string[],
+): { text: string; skills: string[]; addedSkillSources: string[] } {
+  const baseText = snapshot.existed ? snapshot.text : EMPTY_CONFIG_TEXT;
+  const errors: ParseError[] = [];
+  const data = parse(baseText, errors, { allowTrailingComma: true }) as Record<string, unknown> | null;
+  if (errors.length || !data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error(`OpenCode config is not valid JSON/JSONC: ${snapshot.path}`);
+  }
+
+  const current = stringArray(data.skills);
+  const next = [...current];
+  const addedSkillSources: string[] = [];
+  for (const source of skillSources) {
+    const resolved = resolveConfigSource(source, snapshot.path);
+    if (!resolved) throw new Error(`Cannot register glob skill source transactionally: ${source}`);
+    if (next.some(existing => resolveConfigSource(existing, snapshot.path) === resolved)) continue;
+    next.push(source);
+    addedSkillSources.push(source);
+  }
+
+  return {
+    text: configTextWithSkills(snapshot, next),
+    skills: next,
+    addedSkillSources,
+  };
+}
+
+async function assertConfigFingerprint(
+  path: string,
+  expected: string,
+  expectedIdentity?: { dev: number; ino: number },
+): Promise<void> {
+  const pathStat = await tryLstat(path);
+  const actual = await fileFingerprint(path);
+  if (
+    actual !== expected
+    || (expectedIdentity && (!pathStat || pathStat.isSymbolicLink() || fileIdentity(pathStat).dev !== expectedIdentity.dev || fileIdentity(pathStat).ino !== expectedIdentity.ino))
+  ) {
+    throw new Error(`OpenCode config changed during migration: ${path}`);
+  }
+}
+
+async function atomicReplaceConfig(
+  snapshot: OpenCodeConfigSnapshot,
+  text: string,
+  expectedCurrentFingerprint?: string,
+  expectedCurrentIdentity?: { dev: number; ino: number },
+): Promise<string> {
+  const expected = expectedCurrentFingerprint ?? snapshot.fingerprint;
+  const identity = expectedCurrentIdentity ?? snapshot.identity;
+  await assertConfigFingerprint(snapshot.path, expected, identity);
+  await mkdir(dirname(snapshot.path), { recursive: true });
+
+  const temporary = join(dirname(snapshot.path), `.${basename(snapshot.path)}.skillrepo-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, text, { encoding: 'utf8', mode: snapshot.mode ?? 0o600 });
+    if (snapshot.mode !== undefined) await chmod(temporary, snapshot.mode & 0o7777);
+    await assertConfigFingerprint(snapshot.path, expected, identity);
+    await rename(temporary, snapshot.path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+  return fingerprintText(text);
+}
+
+export async function writeOpenCodeConfigAtomically(
+  snapshot: OpenCodeConfigSnapshot,
+  text: string,
+): Promise<string> {
+  if (snapshot.existed && fingerprintText(snapshot.text) === fingerprintText(text)) return snapshot.fingerprint;
+  return await atomicReplaceConfig(snapshot, text);
+}
+
+export async function restoreOpenCodeConfig(
+  snapshot: OpenCodeConfigSnapshot,
+  expectedCurrentFingerprint: string,
+  expectedCurrentIdentity?: { dev: number; ino: number },
+): Promise<void> {
+  if (!snapshot.existed) {
+    await assertConfigFingerprint(snapshot.path, expectedCurrentFingerprint, expectedCurrentIdentity);
+    if (expectedCurrentFingerprint !== ABSENT_FINGERPRINT) await unlink(snapshot.path);
+    return;
+  }
+
+  await atomicReplaceConfig(snapshot, snapshot.text, expectedCurrentFingerprint, expectedCurrentIdentity);
 }
 
 function repoId(repoPath: string): string {
   const id = basename(repoPath).trim();
   if (!id || id === '.' || id === '..') throw new Error(`Cannot derive repo id from ${repoPath}`);
   return id.replace(/[^A-Za-z0-9._-]+/g, '-');
+}
+
+export function agentRegistrationPath(repoInput: string): string {
+  return join(opencodeConfigDir(), 'agents', repoId(resolve(repoInput)));
 }
 
 function frontmatter(text: string): Record<string, unknown> {
@@ -123,6 +298,9 @@ async function collectSkillIds(skillsDir: string, strictDuplicates: boolean): Pr
   for (const path of await walkFiles(skillsDir)) {
     if (basename(path) !== 'SKILL.md') continue;
     const meta = frontmatter(await readFile(path, 'utf8'));
+    if (Object.prototype.hasOwnProperty.call(meta, 'name') && typeof meta.name !== 'string') {
+      throw new Error(`${path}: skill frontmatter name must be a string`);
+    }
     const id = typeof meta.name === 'string' && meta.name.trim()
       ? meta.name.trim()
       : basename(dirname(path));
@@ -151,6 +329,9 @@ async function collectAgentNames(
   for (const path of await walkFiles(agentsDir)) {
     if (!path.endsWith('.md')) continue;
     const meta = frontmatter(await readFile(path, 'utf8'));
+    if (Object.prototype.hasOwnProperty.call(meta, 'name') && typeof meta.name !== 'string') {
+      throw new Error(`${path}: agent frontmatter name must be a string`);
+    }
     const name = typeof meta.name === 'string' ? meta.name.trim() : '';
     if (!name) {
       if (requireStableName) issues.push(`${path}: missing stable frontmatter name`);
@@ -169,16 +350,19 @@ async function collectAgentNames(
 
 export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
   const repo = resolve(repoInput);
-  if (!(await directoryExists(repo))) throw new Error(`Repo path is not a directory: ${repo}`);
+  const repoStat = await tryLstat(repo);
+  if (!repoStat?.isDirectory() || repoStat.isSymbolicLink()) throw new Error(`Repo path is not a real directory: ${repo}`);
 
   const skills = join(repo, 'skills');
   const agents = join(repo, 'agents');
-  const hasSkills = await exists(skills);
-  const hasAgents = await exists(agents);
+  const skillsStat = await tryLstat(skills);
+  const agentsStat = await tryLstat(agents);
+  const hasSkills = Boolean(skillsStat);
+  const hasAgents = Boolean(agentsStat);
 
   if (!hasSkills && !hasAgents) throw new Error(`Repo has neither skills/ nor agents/: ${repo}`);
-  if (hasSkills && !(await directoryExists(skills))) throw new Error(`skills path is not a directory: ${skills}`);
-  if (hasAgents && !(await directoryExists(agents))) throw new Error(`agents path is not a directory: ${agents}`);
+  if (hasSkills && (!skillsStat!.isDirectory() || skillsStat!.isSymbolicLink())) throw new Error(`skills path is not a real directory: ${skills}`);
+  if (hasAgents && (!agentsStat!.isDirectory() || agentsStat!.isSymbolicLink())) throw new Error(`agents path is not a real directory: ${agents}`);
 
   const skillIds = hasSkills ? await collectSkillIds(skills, true) : [];
   const agentResult = hasAgents
@@ -308,6 +492,125 @@ async function staticCollisionIssues(inventory: RepoInventory): Promise<string[]
   }
 
   return issues;
+}
+
+export async function prepareRegistration(
+  inventories: RepoInventory[],
+  snapshotInput?: OpenCodeConfigSnapshot,
+): Promise<RegistrationPlan> {
+  const snapshot = snapshotInput ?? await readOpenCodeConfigSnapshot();
+  const skillOwners = new Map<string, string>();
+  const agentOwners = new Map<string, string>();
+  const duplicateIssues: string[] = [];
+
+  for (const inventory of inventories) {
+    for (const id of inventory.skillIds) {
+      const previous = skillOwners.get(id);
+      if (previous) duplicateIssues.push(`Duplicate skill ID '${id}' in ${inventory.repo} (also ${previous})`);
+      else skillOwners.set(id, inventory.repo);
+    }
+    for (const name of inventory.agentNames) {
+      const previous = agentOwners.get(name);
+      if (previous) duplicateIssues.push(`Duplicate agent name '${name}' in ${inventory.repo} (also ${previous})`);
+      else agentOwners.set(name, inventory.repo);
+    }
+  }
+
+  if (duplicateIssues.length) throw new Error(`Registration batch validation failed:\n${duplicateIssues.join('\n')}`);
+
+  const collisions: string[] = [];
+  for (const inventory of inventories) collisions.push(...await staticCollisionIssues(inventory));
+  if (collisions.length) throw new Error(`Registration blocked:\n${collisions.join('\n')}`);
+
+  const skillSources = inventories
+    .map(inventory => inventory.skillsDir)
+    .filter((path): path is string => Boolean(path));
+  const prospective = prospectiveOpenCodeConfig(snapshot, skillSources);
+  const agentLinks = inventories
+    .map(inventory => inventory.agentsDir
+      ? { path: agentRegistrationPath(inventory.repo), target: inventory.agentsDir }
+      : undefined)
+    .filter((link): link is { path: string; target: string } => Boolean(link));
+
+  return {
+    configPath: snapshot.path,
+    skillSources,
+    addedSkillSources: prospective.addedSkillSources,
+    agentLinks,
+  };
+}
+
+function pathIsWithin(root: string, candidate: string): boolean {
+  const resolvedRoot = resolve(root);
+  const resolvedCandidate = resolve(candidate);
+  return resolvedRoot === resolvedCandidate || resolvedCandidate.startsWith(`${resolvedRoot}${sep}`);
+}
+
+export async function assertNoConfiguredIdentifierCollisions(
+  skillIds: string[],
+  agentNames: string[],
+  ignoredAgentPaths: string[] = [],
+  ignoredSkillPaths: string[] = [],
+): Promise<void> {
+  const issues: string[] = [];
+  const configPath = opencodeConfigFile();
+  const { data } = await readConfig(configPath);
+  const skillSet = new Set(skillIds);
+  const configuredSkillOwners = new Map<string, string>();
+
+  for (const source of stringArray(data.skills)) {
+    const resolved = resolveConfigSource(source, configPath);
+    if (!resolved || !(await directoryExists(resolved))) continue;
+    for (const id of await collectSkillIds(resolved, true)) {
+      const previous = configuredSkillOwners.get(id);
+      if (previous && resolveConfigSource(previous, configPath) !== resolved) {
+        issues.push(`Duplicate configured skill ID '${id}': ${previous} and ${source}`);
+      } else {
+        configuredSkillOwners.set(id, source);
+      }
+      if (skillSet.has(id) && !ignoredSkillPaths.some(path => resolve(path) === resolved)) {
+        issues.push(`Skill ID collision '${id}' with configured source ${source}`);
+      }
+    }
+  }
+
+  const agentSet = new Set(agentNames);
+  const agentRoot = join(opencodeConfigDir(), 'agents');
+  if (agentSet.size && await directoryExists(agentRoot)) {
+    for (const entry of await readdir(agentRoot, { withFileTypes: true })) {
+      const path = join(agentRoot, entry.name);
+      if (ignoredAgentPaths.some(root => pathIsWithin(root, path))) continue;
+
+      let names: string[] = [];
+      if (entry.isSymbolicLink()) {
+        const target = resolve(agentRoot, await readlink(path));
+        if (await directoryExists(target)) {
+          const result = await collectAgentNames(target, false);
+          issues.push(...result.issues);
+          names = result.names;
+        }
+        else if (entry.name.endsWith('.md') && await exists(path)) {
+          const meta = frontmatter(await readFile(path, 'utf8'));
+          const name = typeof meta.name === 'string' ? meta.name.trim() : '';
+          if (name) names = [name];
+        }
+      } else if (entry.isDirectory()) {
+        const result = await collectAgentNames(path, false);
+        issues.push(...result.issues);
+        names = result.names;
+      } else if (entry.isFile() && entry.name.endsWith('.md')) {
+        const meta = frontmatter(await readFile(path, 'utf8'));
+        const name = typeof meta.name === 'string' ? meta.name.trim() : '';
+        if (name) names = [name];
+      }
+
+      for (const name of names) {
+        if (agentSet.has(name)) issues.push(`Agent name collision '${name}' with ${path}`);
+      }
+    }
+  }
+
+  if (issues.length) throw new Error(`Registration blocked:\n${issues.join('\n')}`);
 }
 
 export async function registerRepo(
@@ -488,9 +791,93 @@ export async function verifyOpenCode(): Promise<VerifyResult[]> {
   ]);
 }
 
-async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: string[] }> {
+export async function verifyMigrationDiscovery(
+  inventories: RepoInventory[],
+  registration: Pick<RegistrationPlan, 'skillSources' | 'agentLinks'>,
+): Promise<VerifyResult[]> {
+  const skillIds = [...new Set(inventories.flatMap(inventory => inventory.skillIds))];
+  const agentNames = [...new Set(inventories.flatMap(inventory => inventory.agentNames))];
+  const probes = await verifyOpenCode();
+  const results = probes.map(result => {
+    if (result.command === 'opencode debug skill') return expectIdentifiers(result, skillIds, true, 'skill');
+    if (result.command === 'opencode agent list') return expectIdentifiers(result, agentNames, true, 'agent');
+    return result;
+  });
+
+  const issues: string[] = [];
+  try {
+    const configPath = registrationSourceConfigPath();
+    const { data } = await readConfig(configPath);
+    const configuredSources = stringArray(data.skills);
+    const configuredById = new Map<string, string>();
+
+    for (const source of configuredSources) {
+      const resolved = resolveConfigSource(source, configPath);
+      if (!resolved || !(await directoryExists(resolved))) continue;
+      for (const id of await collectSkillIds(resolved, false)) {
+        const previous = configuredById.get(id);
+        if (previous && previous !== source) issues.push(`Duplicate discovered skill ID '${id}': ${previous} and ${source}`);
+        else configuredById.set(id, source);
+      }
+    }
+
+    for (const source of registration.skillSources) {
+      if (!(await directoryExists(source))) {
+        issues.push(`Missing migrated skill source: ${source}`);
+        continue;
+      }
+      if (!configuredSources.some(value => resolveConfigSource(value, configPath) === source)) {
+        issues.push(`Migrated skill source is not configured: ${source}`);
+      }
+    }
+
+    for (const inventory of inventories) {
+      if (!inventory.skillsDir) continue;
+      if (!registration.skillSources.includes(inventory.skillsDir)) {
+        issues.push(`Migrated repository skill source is missing from registration plan: ${inventory.skillsDir}`);
+      }
+      const discovered = await collectSkillIds(inventory.skillsDir, false);
+      const missing = inventory.skillIds.filter(id => !discovered.includes(id));
+      if (missing.length) issues.push(`Migrated skill source does not contain expected IDs: ${missing.join(', ')}`);
+    }
+
+    for (const link of registration.agentLinks) {
+      const linkStat = await tryLstat(link.path);
+      if (!linkStat?.isSymbolicLink()) {
+        issues.push(`Missing migrated agent registration link: ${link.path}`);
+        continue;
+      }
+      const target = resolve(dirname(link.path), await readlink(link.path));
+      if (target !== link.target) issues.push(`Migrated agent registration points elsewhere: ${link.path} -> ${target}`);
+      if (!(await directoryExists(link.target))) issues.push(`Missing migrated agent source: ${link.target}`);
+      const inventory = inventories.find(item => item.agentsDir === link.target);
+      if (inventory) {
+        const discovered = (await collectAgentNames(link.target, false)).names;
+        const missing = inventory.agentNames.filter(name => !discovered.includes(name));
+        if (missing.length) issues.push(`Migrated agent source does not contain expected names: ${missing.join(', ')}`);
+      }
+    }
+  } catch (error) {
+    issues.push(error instanceof Error ? error.message : String(error));
+  }
+
+  results.push({
+    ok: issues.length === 0,
+    command: 'skillrepo migration targets',
+    stdout: issues.length ? '' : 'all migrated targets are configured and readable',
+    stderr: issues.join('\n'),
+  });
+  return results;
+}
+
+function registrationSourceConfigPath(): string {
+  return opencodeConfigFile();
+}
+
+async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: string[]; registeredSources: number }> {
   const issues: string[] = [];
   const configuredSkillIds = new Set<string>();
+  let registeredSources = 0;
   let configPath: string;
 
   try {
@@ -499,6 +886,7 @@ async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: strin
     return {
       issues: [error instanceof Error ? error.message : String(error)],
       skillIds: [],
+      registeredSources: 0,
     };
   }
 
@@ -513,6 +901,7 @@ async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: strin
         issues.push(`Missing skill source: ${source}`);
         continue;
       }
+      registeredSources += 1;
 
       for (const id of await collectSkillIds(resolved, false)) {
         configuredSkillIds.add(id);
@@ -538,6 +927,7 @@ async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: strin
           continue;
         }
         if (await directoryExists(target)) {
+          registeredSources += 1;
           const result = await collectAgentNames(target, false);
           issues.push(...result.issues);
           for (const name of result.names) {
@@ -565,12 +955,15 @@ async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: strin
     }
   }
 
-  return { issues, skillIds: [...configuredSkillIds] };
+  return { issues, skillIds: [...configuredSkillIds], registeredSources };
 }
 
 export async function doctor(): Promise<{ ok: boolean; issues: string[]; verification: VerifyResult[] }> {
   const staticChecks = await doctorStaticChecks();
   const issues = staticChecks.issues;
+  if (staticChecks.registeredSources === 0) {
+    issues.push('No registered skill or agent target source found');
+  }
   const verification = await verifyOpenCode();
   for (const result of verification) {
     if (!result.ok) {

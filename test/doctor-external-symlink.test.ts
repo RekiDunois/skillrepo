@@ -115,3 +115,22 @@ test('doctor reports configured skills missing from OpenCode discovery', async (
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test('doctor does not report success when OpenCode has no registered target source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-doctor-empty-'));
+  const configDir = join(root, 'opencode');
+  const binDir = join(root, 'bin');
+  try {
+    await mkdir(configDir, { recursive: true });
+    await mkdir(binDir, { recursive: true });
+    const opencode = join(binDir, 'opencode');
+    await writeFile(opencode, '#!/usr/bin/env sh\nexit 0\n', 'utf8');
+    await chmod(opencode, 0o755);
+
+    const result = await withDoctorEnv(configDir, binDir, () => doctor());
+    assert.equal(result.ok, false);
+    assert.ok(result.issues.some(issue => issue.includes('No registered skill or agent target source')));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
