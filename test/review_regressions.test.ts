@@ -61,27 +61,28 @@ test('ambiguous coverage directory is scanned and never auto-ignored by basename
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('migration ignore refuses a symlinked .gitignore and does not modify its target', async () => {
+test('migration ignore treats a symlinked .gitignore as manual and does not modify its target', async t => {
+  if (process.platform === 'win32') { t.skip('symlink creation is not reliable on Windows CI'); return; }
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-ignore-symlink-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'ignore-repo'); const plan = join(root, 'migration-plan.json'); const outside = join(root, 'shared-ignore');
   try {
     await mkdir(join(repo, '__pycache__'), { recursive: true }); await writePlan(plan, 'ignore-repo', '/unused'); await writeFile(outside, '# shared\n', 'utf8'); await symlink(outside, join(repo, '.gitignore'));
-    await assert.rejects(applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }), /non-regular \.gitignore/); assert.equal(await readFile(outside, 'utf8'), '# shared\n');
+    const result = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }); assert.equal(result.repositories.length, 0); assert.equal(result.manualRepositories.length, 1); assert.equal(await readFile(outside, 'utf8'), '# shared\n');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('commit readiness does not trust an ignore rule when .gitignore contains negation', async () => {
+test('commit readiness delegates negation semantics to Git', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-ignore-negation-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'negation-repo'); const plan = join(root, 'migration-plan.json');
   try {
     await mkdir(join(repo, '.venv'), { recursive: true }); await writePlan(plan, 'negation-repo', '/unused'); await writeFile(join(repo, '.gitignore'), '.venv/\n!.venv/\n', 'utf8');
-    const result = await auditMigrationCommitReadiness({ planPath: plan, targetRoot }); const audited = result.repositories[0]!; assert.ok(audited.findings.some(item => item.code === 'gitignore-negation-present')); assert.ok(audited.findings.some(item => item.code === 'local-runtime-environment')); assert.ok(audited.ignoreCandidates.some(item => item.pattern === '.venv/')); assert.equal(result.readyForInitialCommit, false);
+    const result = await auditMigrationCommitReadiness({ planPath: plan, targetRoot }); const audited = result.repositories[0]!; assert.ok(audited.findings.some(item => item.code === 'local-runtime-environment')); assert.ok(audited.ignoreCandidates.some(item => item.pattern === '.venv/')); assert.equal(result.readyForInitialCommit, false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('migration ignore preserves log negation semantics', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-log-negation-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'log-repo'); const plan = join(root, 'migration-plan.json'); const gitignore = join(repo, '.gitignore'); const original = '*.log\n!important.log\n';
   try {
-    await mkdir(repo, { recursive: true }); await writePlan(plan, 'log-repo', '/unused'); await writeFile(join(repo, 'debug.log'), 'generated\n', 'utf8'); await writeFile(gitignore, original, 'utf8');
-    const result = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }); assert.equal(result.patterns, 0); assert.equal(result.repositories.length, 0); assert.equal(await readFile(gitignore, 'utf8'), original);
+    await mkdir(repo, { recursive: true }); await writePlan(plan, 'log-repo', '/unused'); await writeFile(join(repo, 'important.log'), 'generated\n', 'utf8'); await writeFile(gitignore, original, 'utf8');
+    const result = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }); assert.equal(result.patterns, 0); assert.equal(result.repositories.length, 0); assert.equal(result.manualRepositories.length, 1); assert.equal(await readFile(gitignore, 'utf8'), original);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -89,7 +90,7 @@ test('migration ignore preserves virtualenv negation semantics', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-venv-negation-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'venv-repo'); const plan = join(root, 'migration-plan.json'); const gitignore = join(repo, '.gitignore'); const original = '.venv/\n!.venv/\n';
   try {
     await mkdir(join(repo, '.venv'), { recursive: true }); await writePlan(plan, 'venv-repo', '/unused'); await writeFile(gitignore, original, 'utf8');
-    const result = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }); assert.equal(result.patterns, 0); assert.equal(result.repositories.length, 0); assert.equal(await readFile(gitignore, 'utf8'), original);
+    const result = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }); assert.equal(result.patterns, 0); assert.equal(result.repositories.length, 0); assert.equal(result.manualRepositories.length, 1); assert.equal(await readFile(gitignore, 'utf8'), original);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
