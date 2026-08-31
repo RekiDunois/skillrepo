@@ -13,8 +13,8 @@
   },
   "engines": { "node": ">=22" },
   "dependencies": {
-    "jsonc-parser": "^3.3.1",
-    "yaml": "^2.8.1"
+    "gray-matter": "4.0.3",
+    "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.17.2",
