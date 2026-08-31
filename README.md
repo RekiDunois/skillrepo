@@ -8,6 +8,7 @@
 skillrepo register <repo>
 skillrepo unregister <repo>
 skillrepo doctor
+skillrepo migration apply --target-root <dir> [--plan <file>] [--execute]
 ```
 
 A registered repo follows this convention:
@@ -30,6 +31,38 @@ skillrepo register ./example --no-verify
 
 `doctor` checks filesystem/config linkage and invokes documented OpenCode CLI commands so errors can be separated into local registration problems versus OpenCode discovery/runtime problems.
 
+## Thin migration apply
+
+Migration execution is deliberately mechanical. Repository grouping belongs in `migration-plan.json`; `migration apply` does not regroup, infer dependencies, initialize Git repositories, commit, push, or manage remotes.
+
+The command is a dry-run unless `--execute` is explicitly supplied:
+
+```bash
+skillrepo migration apply \
+  --plan ./migration-plan.json \
+  --target-root ~/skill-repos
+
+# after reviewing every source -> target move
+skillrepo migration apply \
+  --plan ./migration-plan.json \
+  --target-root ~/skill-repos \
+  --execute
+```
+
+The current schema consumes repositories whose action is `CREATE_AND_MOVE` and mechanically maps:
+
+```text
+<sourceRoot>/skill/<id>      -> <targetRoot>/<repo>/skills/<id>
+<sourceRoot>/agents/<file>   -> <targetRoot>/<repo>/agents/<file>
+<sourceRoot>/<lib path>      -> <targetRoot>/<repo>/<lib path>
+```
+
+Before the first rename, all sources and targets are preflighted. Duplicate/overlapping sources, missing sources, existing targets, symlink sources, unsafe paths, and cross-filesystem moves are blocked before mutation begins.
+
+After a skill directory moves, its old directory is recreated **without `SKILL.md`** and its remaining top-level runtime resources are symlinked to the new location. This keeps existing absolute paths such as `.../skill/foo/scripts/...` and `.../skill/foo/.venv/...` working without making OpenCode discover the same skill twice. Shared `lib/` paths get a direct compatibility symlink. Agent files do not get old-path symlinks because that would create duplicate agent discovery; missing agent frontmatter `name` is filled mechanically from the filename before registration.
+
+Finally, each new repo is registered through the normal `registerRepo` path. Unless `--no-verify` is used, the migration then requires the real OpenCode CLI to discover every migrated skill and agent. A failed OpenCode discovery check is reported as a migration failure; there is intentionally no separate migration dependency solver or semantic repair engine.
+
 ## Development
 
 Requires Node.js 22+.
@@ -40,5 +73,3 @@ npm test
 ```
 
 GitHub Actions additionally installs the real OpenCode CLI, registers a fixture repository, and verifies discovery through OpenCode itself.
-
-Migration/analyzer functionality is intentionally not part of this first milestone.
