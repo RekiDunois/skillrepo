@@ -2,7 +2,7 @@ import { access, lstat, mkdir, readFile, readdir, rename, symlink, writeFile } f
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
-import { parseFrontmatter } from './frontmatter.js';
+import YAML from 'yaml';
 import {
   assertNoRuntimeCollisions,
   inspectRepo,
@@ -244,8 +244,9 @@ async function preflight(operations: MoveOperation[]): Promise<void> {
 }
 
 function frontmatter(text: string): Record<string, unknown> | null {
-  const parsed = parseFrontmatter(text);
-  return parsed.hasFrontmatter ? parsed.data : null;
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  if (!match) return null;
+  return (YAML.parse(match[1]) ?? {}) as Record<string, unknown>;
 }
 
 async function ensureStableAgentName(path: string): Promise<void> {
