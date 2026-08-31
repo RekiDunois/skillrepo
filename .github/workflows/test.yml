@@ -15,6 +15,8 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npm test
+      - name: Verify packaged CLI entrypoint
+        run: node -e "const fs=require('node:fs'); const p=require('./package.json'); if (!fs.existsSync(p.bin.skillrepo)) { console.error('Missing CLI bin target:', p.bin.skillrepo); process.exit(1); }"
       - name: Install OpenCode
         run: npm install -g opencode-ai
       - name: Build fixture repo
