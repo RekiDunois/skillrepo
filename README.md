@@ -157,4 +157,4 @@ npm install
 npm test
 ```
 
-GitHub Actions runs the unit suite on both Ubuntu and Windows. The Ubuntu job additionally installs the packaged `skillrepo` CLI and the real OpenCode CLI, registers fixture repositories, verifies discovery, and exercises migration, resume, audit, and ignore flows end-to-end.
+GitHub Actions runs the full unit suite plus packaged CLI/OpenCode integration on Ubuntu. A separate Windows job builds the project and runs the commit-readiness/Git-ignore unit subset, including the target-filesystem `core.ignoreCase` regression, so the filesystem-sensitive Windows branch is exercised without claiming that unrelated POSIX symlink/runtime tests are Windows-portable.
