@@ -2,6 +2,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseFrontmatter } from './frontmatter.js';
+import { preflightGit } from './git_ignore.js';
 import { classifyMigrationPortability, type PortabilitySegment } from './portability.js';
 import { resolveRegisteredResource } from './runtime.js';
 
@@ -170,8 +171,10 @@ async function validateRuntimeActions(actions: PortabilityFixAction[], env: Node
 }
 
 export async function applyMigrationPortabilityFixes(options: { planPath: string; targetRoot: string; dryRun?: boolean; env?: NodeJS.ProcessEnv; gitPath?: string }): Promise<PortabilityFixResult> {
+  const env = options.env ?? process.env;
+  await preflightGit(options.gitPath ?? 'git', env);
   const planPath = resolve(expandHome(options.planPath)); const targetRoot = resolve(expandHome(options.targetRoot)); const plan = await readPlan(planPath); const sourceRoot = resolve(expandHome(plan.generatedFrom!.sourceRoot!));
-  const defaultOpenCodeRoot = resolve(join(homedir(), '.config', 'opencode')); const sourceAlias = sourceRoot === defaultOpenCodeRoot ? '~/.config/opencode' : null; const mappings = buildMappings(plan, sourceRoot); const dryRun = options.dryRun ?? true; const env = options.env ?? process.env; const portability = await classifyMigrationPortability({ planPath, targetRoot, gitPath: options.gitPath, env }); const files: PortabilityFixFile[] = [];
+  const defaultOpenCodeRoot = resolve(join(homedir(), '.config', 'opencode')); const sourceAlias = sourceRoot === defaultOpenCodeRoot ? '~/.config/opencode' : null; const mappings = buildMappings(plan, sourceRoot); const dryRun = options.dryRun ?? true; const portability = await classifyMigrationPortability({ planPath, targetRoot, gitPath: options.gitPath, env }); const files: PortabilityFixFile[] = [];
   for (const item of portability.items) {
     const file = join(targetRoot, item.repoId, item.path); const original = await readFile(file, 'utf8'); const actions = item.segments.flatMap(segment => planSegmentActions(original, segment, sourceRoot, sourceAlias, mappings)); await validateRuntimeActions(actions, env);
     let next = original; for (const action of actions) { if (!action.auto) continue; if (action.kind === 'AUTO-REPO-EXEC') next = rewriteCommandBlock(next, action.mcpEntry!, action.replacementCommand!); else if (action.kind === 'AUTO-DOC-OPENCODE-PATH') next = rewriteMarkdownBodySourceRoot(next, sourceRoot, sourceAlias!); }
