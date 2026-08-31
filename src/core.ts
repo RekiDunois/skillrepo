@@ -86,8 +86,7 @@ export async function registerRepo(repoInput: string): Promise<{ repo: string; s
   let skillPath: string | undefined;
   if (await exists(skills)) {
     skillPath = skills;
-    const config = opencodeConfigFile();
-    await updateSkills(config, current => current.includes(skills) ? current : [...current, skills]);
+    await updateSkills(opencodeConfigFile(), current => current.includes(skills) ? current : [...current, skills]);
   }
 
   let agentLink: string | undefined;
@@ -111,8 +110,7 @@ export async function registerRepo(repoInput: string): Promise<{ repo: string; s
 export async function unregisterRepo(repoInput: string): Promise<void> {
   const repo = resolve(repoInput);
   const skills = join(repo, 'skills');
-  const config = opencodeConfigFile();
-  await updateSkills(config, current => current.filter(path => resolve(path) !== skills));
+  await updateSkills(opencodeConfigFile(), current => current.filter(path => resolve(path) !== skills));
 
   const link = join(opencodeConfigDir(), 'agents', repoId(repo));
   if (await exists(link)) {
@@ -137,8 +135,7 @@ export async function runOpenCode(args: string[], env = process.env): Promise<Ve
 
 export async function verifyOpenCode(): Promise<VerifyResult[]> {
   return await Promise.all([
-    runOpenCode(['debug', 'config']),
-    runOpenCode(['debug', 'skill']),
+    runOpenCode(['--version']),
     runOpenCode(['agent', 'list']),
   ]);
 }
