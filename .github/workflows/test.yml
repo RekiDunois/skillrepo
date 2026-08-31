@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           repo="$RUNNER_TEMP/fixture-repo"
-          mkdir -p "$repo/skills/fixture-skill" "$repo/agents"
+          mkdir -p "$repo/skills/fixture-skill" "$repo/agents" "$repo/bin"
           cat > "$repo/skills/fixture-skill/SKILL.md" <<'EOF'
           ---
           name: fixture-skill
@@ -63,6 +63,12 @@ jobs:
           ---
           Test fixture.
           EOF
+          cat > "$repo/bin/runtime-probe.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf 'registered-runtime:%s\n' "$1"
+          EOF
+          chmod +x "$repo/bin/runtime-probe.sh"
       - name: Register fixture with repo-specific post-check
         shell: bash
         env:
@@ -72,6 +78,13 @@ jobs:
           skillrepo register "$RUNNER_TEMP/fixture-repo"
           skillrepo register "$RUNNER_TEMP/fixture-repo"
           skillrepo doctor
+      - name: Verify registered runtime exec through packaged CLI
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: |
+          set -euo pipefail
+          skillrepo exec fixture-repo bin/runtime-probe.sh --probe | grep -F 'registered-runtime:--probe'
       - name: Verify initial discovery through OpenCode
         shell: bash
         env:
