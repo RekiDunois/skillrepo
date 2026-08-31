@@ -11,9 +11,10 @@ import {
   verifyRepoUnregistered,
   type VerifyResult,
 } from './core.js';
+import { applyMigration } from './migration.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--no-verify]`);
   process.exit(2);
 }
 
@@ -72,6 +73,47 @@ async function main(): Promise<void> {
       if (!printVerification(results)) {
         throw new Error('OpenCode post-check failed after unregister. Run skillrepo doctor for details.');
       }
+    }
+    return;
+  }
+
+  if (command === 'migration') {
+    const [subcommand, ...migrationArgs] = rest;
+    if (subcommand !== 'apply') usage();
+
+    const { values, positionals } = parseArgs({
+      args: migrationArgs,
+      allowPositionals: true,
+      allowNegative: true,
+      options: {
+        plan: { type: 'string', default: 'migration-plan.json' },
+        'target-root': { type: 'string' },
+        execute: { type: 'boolean', default: false },
+        verify: { type: 'boolean', default: true },
+      },
+    });
+    if (positionals.length || !values['target-root']) usage();
+
+    const result = await applyMigration({
+      planPath: values.plan!,
+      targetRoot: values['target-root'],
+      dryRun: !values.execute,
+      verify: values.verify,
+    });
+
+    if (result.dryRun) {
+      console.log(`Migration dry-run: ${result.moves.length} move(s) into ${result.repositories.length} repo(s)`);
+      for (const move of result.moves) {
+        console.log(`  ${move.kind}: ${move.source} -> ${move.target}`);
+      }
+      console.log('No files were moved. Re-run with --execute only after reviewing this output.');
+      return;
+    }
+
+    console.log(`Migration applied: ${result.moves.length} move(s) into ${result.repositories.length} repo(s)`);
+    console.log(`Compatibility paths: ${result.compatibilityPaths.length}`);
+    if (result.verification.length && !printVerification(result.verification)) {
+      throw new Error('OpenCode verification failed after migration. Run skillrepo doctor for details.');
     }
     return;
   }
