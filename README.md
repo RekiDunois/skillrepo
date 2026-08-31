@@ -13,8 +13,8 @@ skillrepo doctor
 skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume]
 skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]
 skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]
-skillrepo migration portability --target-root <dir> [--plan <file>] [--json]
-skillrepo migration portability fix --target-root <dir> [--plan <file>] [--execute] [--json]
+skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]
+skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]
 ```
 
 A registered repo follows this convention:
@@ -89,7 +89,7 @@ Commit-readiness has an explicit Git trust boundary:
 
 > skillrepo MAY produce safe ignore suggestions, but MUST NOT interpret effective `.gitignore` semantics itself. Effective-ignore decisions are delegated to the selected Git executable.
 
-`migration audit` and `migration ignore` therefore require a usable Git executable. They preflight Git before reading the migration plan or scanning repositories. By default `git` is resolved from `PATH`; `--git <path>` selects an explicit executable. There is no parser-based fallback that can return `COMMIT-READY: YES` when Git is unavailable.
+Commands that consume the commit-readiness audit oracle (`migration audit`, `migration ignore`, `migration portability`, and `migration portability fix`) require a usable Git executable and accept the same `--git <path>` selector. They preflight the selected Git before repository scanning. By default `git` is resolved from `PATH`. There is no parser-based fallback that can return `COMMIT-READY: YES` when Git is unavailable.
 
 For ignore probes, skillrepo uses `git check-ignore --no-index` with Git metadata created only in a temporary directory and `GIT_WORK_TREE` pointed at the migrated repository. It never runs `git init` in the migrated target and never creates `<repo>/.git`.
 
