@@ -199,7 +199,7 @@ async function main() {
   const sourceStat = await lstat(source).catch(() => null);
   if (!sourceStat?.isDirectory()) usage(`Source is not a directory: ${displayPath(source)}`);
 
-  const out = resolve(expandHome(outArg ?? join(source, '.skillrepo-inventory'));
+  const out = resolve(expandHome(outArg ?? join(source, '.skillrepo-inventory')));
   if (!inside(source, out)) {
     console.warn(`note: output is outside source and will not be included automatically by a source-root sync: ${displayPath(out)}`);
   }
