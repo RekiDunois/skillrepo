@@ -306,3 +306,13 @@ jobs:
             --plan "$RUNNER_TEMP/migration-plan.json" \
             --target-root "$RUNNER_TEMP/migration-repos" \
             --execute | grep -F '0 pattern(s) across 0 repo(s)'
+
+  unit-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm test
