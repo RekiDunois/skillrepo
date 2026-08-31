@@ -142,6 +142,45 @@ test('Git respects nested gitignore rules and escaped leading markers', async ()
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
 
+test('initialized repository uses its own info exclude context', async () => {
+  const gitPath = await locateGit();
+  const f = await fixture('skillrepo-git-info-exclude-', 'initialized-info-repo');
+  try {
+    await execFileAsync(gitPath, ['init', '--quiet', f.repo]);
+    await writeFile(join(f.repo, '.git', 'info', 'exclude'), '*.log\n', 'utf8');
+    await writeFile(join(f.repo, 'debug.log'), 'ignored by repository-local info exclude\n', 'utf8');
+
+    const audit = await auditMigrationRepos({ planPath: f.plan, targetRoot: f.targetRoot, gitPath });
+    assert.ok(audit.repositories[0]!.findings.some(item => item.code === 'git-already-initialized'));
+    assert.equal(audit.repositories[0]!.ignoreCandidates.some(item => item.paths.includes('debug.log')), false);
+
+    const result = await applyMigrationIgnores({ planPath: f.plan, targetRoot: f.targetRoot, dryRun: false, gitPath });
+    assert.equal(result.repositories.length, 0);
+    assert.equal(result.manualRepositories.length, 0);
+    await assert.rejects(access(join(f.repo, '.gitignore')), 'real repository ignore state must prevent redundant root .gitignore creation');
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('initialized repository honors local core.excludesFile', async () => {
+  const gitPath = await locateGit();
+  const f = await fixture('skillrepo-git-local-excludes-', 'initialized-config-repo');
+  const excludes = join(f.root, 'repo-local-excludes');
+  try {
+    await execFileAsync(gitPath, ['init', '--quiet', f.repo]);
+    await writeFile(excludes, '*.tmp\n', 'utf8');
+    await execFileAsync(gitPath, ['-C', f.repo, 'config', '--local', 'core.excludesFile', excludes]);
+    await writeFile(join(f.repo, 'scratch.tmp'), 'ignored by repository-local config\n', 'utf8');
+
+    const audit = await auditMigrationRepos({ planPath: f.plan, targetRoot: f.targetRoot, gitPath });
+    assert.equal(audit.repositories[0]!.ignoreCandidates.some(item => item.paths.includes('scratch.tmp')), false);
+
+    const result = await applyMigrationIgnores({ planPath: f.plan, targetRoot: f.targetRoot, dryRun: false, gitPath });
+    assert.equal(result.repositories.length, 0);
+    assert.equal(result.manualRepositories.length, 0);
+    await assert.rejects(access(join(f.repo, '.gitignore')), 'repository-local excludes config must be part of effective ignore semantics');
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
 test('existing gitignore is manual-only and is never rewritten', async () => {
   const f = await fixture('skillrepo-git-manual-', 'manual-repo');
   try {
