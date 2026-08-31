@@ -79,11 +79,24 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
+function isSkillUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
 function configuredSkillPaths(data: Record<string, unknown>): string[] {
   const value = data.skills;
-  if (Array.isArray(value)) return stringArray(value);
+  if (Array.isArray(value)) return stringArray(value).filter(path => !isSkillUrl(path));
   if (value && typeof value === 'object') {
     return stringArray((value as Record<string, unknown>).paths);
+  }
+  return [];
+}
+
+function configuredSkillUrls(data: Record<string, unknown>): string[] {
+  const value = data.skills;
+  if (Array.isArray(value)) return stringArray(value).filter(isSkillUrl);
+  if (value && typeof value === 'object') {
+    return stringArray((value as Record<string, unknown>).urls);
   }
   return [];
 }
@@ -93,15 +106,21 @@ async function updateSkills(configPath: string, updater: (skills: string[]) => s
   const { text, data } = await readConfig(configPath);
   const current = configuredSkillPaths(data);
   const legacyArray = Array.isArray(data.skills);
+  const currentUrls = configuredSkillUrls(data);
   const next = updater(current);
 
   if (!legacyArray && current.length === next.length && current.every((value, index) => value === next[index])) return;
   if (!existed && next.length === 0) return;
 
   // OpenCode 1.18 uses skills.paths; convert the old array form if present.
-  const edits = modify(text, legacyArray ? ['skills'] : ['skills', 'paths'], legacyArray ? { paths: next } : next, {
-    formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
-  });
+  const edits = modify(
+    text,
+    legacyArray ? ['skills'] : ['skills', 'paths'],
+    legacyArray ? { paths: next, urls: currentUrls } : next,
+    {
+      formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
+    },
+  );
   await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, applyEdits(text, edits), 'utf8');
 }

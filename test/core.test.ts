@@ -106,6 +106,32 @@ test('register reuses an existing opencode.json and preserves comments', async (
   }
 });
 
+test('legacy mixed skill sources split local paths from remote URLs', async () => {
+  const f = await fixture();
+  try {
+    await mkdir(f.configDir, { recursive: true });
+    await writeFile(
+      join(f.configDir, 'opencode.json'),
+      JSON.stringify({ skills: ['https://example.com/skills', join(f.repo, 'skills')] }, null, 2) + '\n',
+      'utf8',
+    );
+
+    await withConfigDir(f.configDir, async () => {
+      await registerRepo(f.repo);
+      const registered = JSON.parse(await readFile(join(f.configDir, 'opencode.json'), 'utf8'));
+      assert.deepEqual(registered.skills.paths, [join(f.repo, 'skills')]);
+      assert.deepEqual(registered.skills.urls, ['https://example.com/skills']);
+
+      await unregisterRepo(f.repo);
+      const unregistered = JSON.parse(await readFile(join(f.configDir, 'opencode.json'), 'utf8'));
+      assert.deepEqual(unregistered.skills.paths, []);
+      assert.deepEqual(unregistered.skills.urls, ['https://example.com/skills']);
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('ambiguous json and jsonc config files are blocked', async () => {
   const f = await fixture();
   try {
