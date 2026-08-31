@@ -82,6 +82,10 @@ function conservativeKind(segments: PortabilitySegment[]): PortabilityKind {
   return segments[0]!.kind;
 }
 
+function hasSegment(item: PortabilityItem, kind: PortabilityKind): boolean {
+  return item.segments.some(segment => segment.kind === kind);
+}
+
 export async function classifyMigrationPortability(options: {
   planPath: string;
   targetRoot: string;
@@ -123,10 +127,10 @@ export async function classifyMigrationPortability(options: {
     items,
     summary: {
       files: items.length,
-      frontmatterRuntime: items.filter(item => item.kind === 'FRONTMATTER-RUNTIME').length,
-      markdownBody: items.filter(item => item.kind === 'MARKDOWN-BODY').length,
-      test: items.filter(item => item.kind === 'TEST').length,
-      runtimeCode: items.filter(item => item.kind === 'RUNTIME-CODE').length,
+      frontmatterRuntime: items.filter(item => hasSegment(item, 'FRONTMATTER-RUNTIME')).length,
+      markdownBody: items.filter(item => hasSegment(item, 'MARKDOWN-BODY')).length,
+      test: items.filter(item => hasSegment(item, 'TEST')).length,
+      runtimeCode: items.filter(item => hasSegment(item, 'RUNTIME-CODE')).length,
     },
   };
 }
@@ -151,9 +155,9 @@ export function renderMigrationPortability(result: MigrationPortabilityResult): 
   }
 
   lines.push(
-    'Summary: '
-      + `${result.summary.frontmatterRuntime} frontmatter-runtime, `
-      + `${result.summary.markdownBody} markdown-body, `
+    'Scopes: '
+      + `${result.summary.frontmatterRuntime} file(s) with frontmatter-runtime, `
+      + `${result.summary.markdownBody} with markdown-body, `
       + `${result.summary.test} test, `
       + `${result.summary.runtimeCode} runtime-code`,
   );
