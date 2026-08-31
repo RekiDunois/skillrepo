@@ -12,10 +12,11 @@ import {
   type VerifyResult,
 } from './core.js';
 import { auditMigrationRepos, renderMigrationAudit } from './audit.js';
+import { applyMigrationIgnores, renderMigrationIgnore } from './ignore.js';
 import { applyMigration } from './migration.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]`);
   process.exit(2);
 }
 
@@ -99,6 +100,28 @@ async function main(): Promise<void> {
         targetRoot: values['target-root'],
       });
       console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationAudit(result));
+      return;
+    }
+
+    if (subcommand === 'ignore') {
+      const { values, positionals } = parseArgs({
+        args: migrationArgs,
+        allowPositionals: true,
+        allowNegative: true,
+        options: {
+          plan: { type: 'string', default: 'migration-plan.json' },
+          'target-root': { type: 'string' },
+          execute: { type: 'boolean', default: false },
+        },
+      });
+      if (positionals.length || !values['target-root']) usage();
+
+      const result = await applyMigrationIgnores({
+        planPath: values.plan!,
+        targetRoot: values['target-root'],
+        dryRun: !values.execute,
+      });
+      console.log(renderMigrationIgnore(result));
       return;
     }
 
