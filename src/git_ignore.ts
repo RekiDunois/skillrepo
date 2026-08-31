@@ -101,6 +101,56 @@ async function createOracleGitDir(repoRoot: string): Promise<string> {
   return await mkdtemp(join(tmpdir(), 'skillrepo-ignore-oracle-'));
 }
 
+function withoutInheritedRepositoryContext(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean = { ...env };
+  delete clean.GIT_DIR;
+  delete clean.GIT_WORK_TREE;
+  delete clean.GIT_INDEX_FILE;
+  return clean;
+}
+
+async function hasOwnGitMetadata(repoRoot: string): Promise<boolean> {
+  try {
+    await lstat(join(repoRoot, '.git'));
+    return true;
+  } catch (error) {
+    if (errnoCode(error) === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function probeInitializedRepository(
+  runtime: GitIgnoreRuntime,
+  repoRoot: string,
+  unique: string[],
+): Promise<Set<string> | null> {
+  if (!await hasOwnGitMetadata(repoRoot)) return null;
+
+  const env = withoutInheritedRepositoryContext(runtime.env);
+  const context = await runProcess(
+    runtime.gitPath,
+    ['-C', repoRoot, 'rev-parse', '--is-inside-work-tree'],
+    { cwd: repoRoot, env },
+  );
+  if (context.code !== 0 || context.stdout.trim() !== 'true') {
+    const detail = context.stderr.trim() || context.stdout.trim() || `exit ${context.code}`;
+    throw new Error(`Existing Git metadata is not a usable worktree for ignore evaluation: ${repoRoot} (${detail})`);
+  }
+
+  const result = await runProcess(
+    runtime.gitPath,
+    ['-C', repoRoot, 'check-ignore', '--no-index', '--stdin', '-z'],
+    { cwd: repoRoot, env, input: `${unique.join('\0')}\0` },
+  );
+  if (result.code !== 0 && result.code !== 1) {
+    throw new Error(`Git check-ignore failed in initialized repository: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`);
+  }
+
+  const ignored = new Set<string>();
+  for (const relPath of result.stdout.split('\0')) if (relPath) ignored.add(relPath);
+  return ignored;
+}
+
 export async function preflightGit(
   gitPathInput = 'git',
   env: NodeJS.ProcessEnv = process.env,
@@ -131,9 +181,16 @@ export async function probeIgnoredPaths(
   const ignored = new Set<string>();
   if (!unique.length) return ignored;
 
-  // A normal future `git init` derives core.ignoreCase from the target filesystem.
-  // Derive it from existing target paths explicitly so a mount point or a fallback
-  // metadata directory on another filesystem cannot change ignore semantics.
+  // If the target already has its own Git metadata, effective ignore semantics
+  // must come from that real repository context so .git/info/exclude and
+  // repository-local ignore configuration are honored.
+  const initialized = await probeInitializedRepository(runtime, repoRoot, unique);
+  if (initialized) return initialized;
+
+  // For an uninitialized target, a normal future `git init` derives
+  // core.ignoreCase from the target filesystem. Derive it from existing target
+  // paths explicitly so a mount point or fallback metadata directory on another
+  // filesystem cannot change ignore semantics.
   const ignoreCase = await deriveTargetIgnoreCase(repoRoot, unique);
   const gitDir = await createOracleGitDir(repoRoot);
   try {
