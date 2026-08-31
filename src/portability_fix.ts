@@ -78,6 +78,15 @@ function yamlKey(line: string): { indent: number; key: string } | null {
   const key = (match[3] ?? match[4] ?? '').trim();
   return key ? { indent: match[1]!.length, key } : null;
 }
+function directChildIndent(lines: string[], start: number, end: number, parentIndent: number): number | null {
+  let result: number | null = null;
+  for (let i = start; i < end; i += 1) {
+    const key = yamlKey(lines[i]!);
+    if (!key || key.indent <= parentIndent) continue;
+    if (result === null || key.indent < result) result = key.indent;
+  }
+  return result;
+}
 
 function findMcpCommandBlock(text: string, entry: string): CommandBlock | null {
   const lines = text.split('\n');
@@ -88,14 +97,22 @@ function findMcpCommandBlock(text: string, entry: string): CommandBlock | null {
   if (mcpIndex < 0) return null;
   let mcpEnd = close;
   for (let i = mcpIndex + 1; i < close; i += 1) if (lines[i]!.trim() && indentation(lines[i]!) <= mcpIndent) { mcpEnd = i; break; }
-  let entryIndex = -1, entryIndent = -1;
-  for (let i = mcpIndex + 1; i < mcpEnd; i += 1) { const key = yamlKey(lines[i]!); if (key?.key === entry && key.indent > mcpIndent) { entryIndex = i; entryIndent = key.indent; break; } }
+  const entryIndentExpected = directChildIndent(lines, mcpIndex + 1, mcpEnd, mcpIndent);
+  if (entryIndentExpected === null) return null;
+  let entryIndex = -1;
+  for (let i = mcpIndex + 1; i < mcpEnd; i += 1) {
+    const key = yamlKey(lines[i]!);
+    if (key?.key === entry && key.indent === entryIndentExpected) { entryIndex = i; break; }
+  }
   if (entryIndex < 0) return null;
+  const entryIndent = entryIndentExpected;
   let entryEnd = mcpEnd;
   for (let i = entryIndex + 1; i < mcpEnd; i += 1) if (lines[i]!.trim() && indentation(lines[i]!) <= entryIndent) { entryEnd = i; break; }
+  const commandIndentExpected = directChildIndent(lines, entryIndex + 1, entryEnd, entryIndent);
+  if (commandIndentExpected === null) return null;
   for (let i = entryIndex + 1; i < entryEnd; i += 1) {
     const key = yamlKey(lines[i]!);
-    if (key?.key !== 'command' || key.indent <= entryIndent) continue;
+    if (key?.key !== 'command' || key.indent !== commandIndentExpected) continue;
     let end = i + 1;
     while (end < entryEnd) { if (lines[end]!.trim() === '') { end += 1; continue; } if (indentation(lines[end]!) <= key.indent) break; end += 1; }
     return { start: i, end, indent: lines[i]!.match(/^\s*/)?.[0] ?? '' };
