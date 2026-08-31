@@ -295,6 +295,12 @@ async function createSkillCompatibilityShim(source: string, target: string): Pro
   return linked;
 }
 
+async function createFileCompatibilityShim(source: string, target: string): Promise<string[]> {
+  await mkdir(dirname(source), { recursive: true });
+  await symlink(target, source);
+  return [source];
+}
+
 async function moveOperation(operation: MoveOperation): Promise<string[]> {
   await mkdir(dirname(operation.target), { recursive: true });
   try {
@@ -308,13 +314,14 @@ async function moveOperation(operation: MoveOperation): Promise<string[]> {
   }
 
   if (operation.kind === 'agent') {
-    if (operation.target.endsWith('.md')) await ensureStableAgentName(operation.target);
-    return [];
+    if (operation.target.endsWith('.md')) {
+      await ensureStableAgentName(operation.target);
+      return [];
+    }
+    return await createFileCompatibilityShim(operation.source, operation.target);
   }
   if (operation.kind === 'lib') {
-    await mkdir(dirname(operation.source), { recursive: true });
-    await symlink(operation.target, operation.source);
-    return [operation.source];
+    return await createFileCompatibilityShim(operation.source, operation.target);
   }
   return await createSkillCompatibilityShim(operation.source, operation.target);
 }
