@@ -15,9 +15,10 @@ import { auditMigrationRepos, renderMigrationAudit } from './audit.js';
 import { applyMigrationIgnores, renderMigrationIgnore } from './ignore.js';
 import { applyMigration } from './migration.js';
 import { classifyMigrationPortability, renderMigrationPortability } from './portability.js';
+import { execRegisteredResource } from './runtime.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--json]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--json]`);
   process.exit(2);
 }
 
@@ -38,6 +39,14 @@ function printVerification(results: VerifyResult[]): boolean {
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   if (!command) usage();
+
+  if (command === 'exec') {
+    if (rest.length < 2) usage();
+    const [repoId, resource, ...args] = rest;
+    const code = await execRegisteredResource({ repoId: repoId!, resource: resource!, args });
+    process.exitCode = code;
+    return;
+  }
 
   if (command === 'register' || command === 'unregister') {
     const { values, positionals } = parseArgs({
