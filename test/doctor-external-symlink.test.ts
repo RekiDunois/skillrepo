@@ -25,7 +25,7 @@ async function withDoctorEnv<T>(configDir: string, binDir: string, fn: () => Pro
   }
 }
 
-test('doctor does not require stable names inside pre-existing external agent symlinks', async () => {
+test('doctor accepts pre-existing external agent directories and runtime file symlinks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-doctor-symlink-'));
   const configDir = join(root, 'opencode');
   const externalAgents = join(root, 'external-repo', 'agents');
@@ -41,7 +41,12 @@ test('doctor does not require stable names inside pre-existing external agent sy
       '---\ndescription: external OpenCode symlink probe\nmode: subagent\n---\nprobe\n',
       'utf8',
     );
+    await writeFile(join(externalAgents, 'runtime-helper.py'), 'print("ok")\n', 'utf8');
     await symlink(externalAgents, join(configDir, 'agents', 'manual-agent-repo'), 'dir');
+    await symlink(
+      join(externalAgents, 'runtime-helper.py'),
+      join(configDir, 'agents', 'runtime-helper.py'),
+    );
 
     const opencode = join(binDir, 'opencode');
     await writeFile(opencode, '#!/usr/bin/env sh\nexit 0\n', 'utf8');
