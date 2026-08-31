@@ -4,8 +4,12 @@ import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { resolveRegisteredRepo, resolveRegisteredResource } from '../src/runtime.js';
+import { delimiter, join, resolve } from 'node:path';
+import {
+  installedSkillrepoSupportsExec,
+  resolveRegisteredRepo,
+  resolveRegisteredResource,
+} from '../src/runtime.js';
 
 function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
@@ -71,6 +75,30 @@ test('registered resource resolver can derive an agent-only repo without a secon
     await symlink(agents, join(configDir, 'agents', 'agent-only-repo'), 'dir');
 
     assert.equal(await resolveRegisteredRepo('agent-only-repo', env), repo);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('runtime capability check distinguishes current exec-capable CLI from a missing binary', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-runtime-capability-'));
+  const bin = join(root, 'bin');
+  const empty = join(root, 'empty');
+  const fake = join(bin, 'skillrepo');
+
+  try {
+    await mkdir(bin, { recursive: true });
+    await mkdir(empty, { recursive: true });
+    await writeFile(
+      fake,
+      '#!/usr/bin/env bash\necho "  skillrepo exec <repo-id> <repo-relative-resource> [args...]" >&2\nexit 2\n',
+      'utf8',
+    );
+    await chmod(fake, 0o755);
+
+    const withFake = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ''}` };
+    assert.equal(await installedSkillrepoSupportsExec(withFake), true);
+    assert.equal(await installedSkillrepoSupportsExec({ ...process.env, PATH: empty }), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
