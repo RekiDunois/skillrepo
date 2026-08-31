@@ -37,7 +37,7 @@ async function buildFixture(root: string): Promise<{ targetRoot: string; repo: s
 
   await writeFile(
     frontmatter,
-    '---\nname: frontmatter\nmcp:\n  demo:\n    command: ["/Users/example/tools/demo"]\n---\nBody.\n',
+    '---\nname: frontmatter\nmcp:\n  demo:\n    command: ["/Users/example/tools/demo"]\n---\nBody references `/Users/example/docs/demo`.\n',
     'utf8',
   );
   await writeFile(markdown, 'Run `/Users/example/tools/demo` for the old example.\n', 'utf8');
@@ -58,19 +58,25 @@ test('migration portability classifies audit findings without changing repositor
     const result = await classifyMigrationPortability({ planPath: fixture.plan, targetRoot: fixture.targetRoot });
     assert.equal(result.summary.files, 4);
     assert.equal(result.summary.frontmatterRuntime, 1);
-    assert.equal(result.summary.markdownBody, 1);
+    assert.equal(result.summary.markdownBody, 2);
     assert.equal(result.summary.test, 1);
     assert.equal(result.summary.runtimeCode, 1);
 
     const byPath = new Map(result.items.map(item => [item.path, item]));
-    assert.equal(byPath.get('skills/frontmatter/SKILL.md')?.kind, 'FRONTMATTER-RUNTIME');
-    assert.deepEqual(byPath.get('skills/frontmatter/SKILL.md')?.lines, [5]);
+    const mixed = byPath.get('skills/frontmatter/SKILL.md');
+    assert.equal(mixed?.kind, 'FRONTMATTER-RUNTIME');
+    assert.deepEqual(mixed?.lines, [5, 7]);
+    assert.deepEqual(mixed?.segments, [
+      { kind: 'FRONTMATTER-RUNTIME', lines: [5] },
+      { kind: 'MARKDOWN-BODY', lines: [7] },
+    ]);
     assert.equal(byPath.get('docs/usage.md')?.kind, 'MARKDOWN-BODY');
     assert.equal(byPath.get('tests/test_paths.py')?.kind, 'TEST');
     assert.equal(byPath.get('run.py')?.kind, 'RUNTIME-CODE');
 
     const rendered = renderMigrationPortability(result);
     assert.match(rendered, /4 file\(s\)/);
+    assert.match(rendered, /\[MIXED\]/);
     assert.match(rendered, /FRONTMATTER-RUNTIME/);
     assert.match(rendered, /MARKDOWN-BODY/);
     assert.match(rendered, /RUNTIME-CODE/);
@@ -101,16 +107,17 @@ test('migration portability CLI emits machine-readable classification', async ()
     assert.equal(stderr, '');
     const parsed = JSON.parse(stdout) as {
       summary: { files: number; frontmatterRuntime: number; markdownBody: number; test: number; runtimeCode: number };
-      items: Array<{ kind: string; path: string }>;
+      items: Array<{ kind: string; path: string; segments: Array<{ kind: string; lines: number[] }> }>;
     };
     assert.deepEqual(parsed.summary, {
       files: 4,
       frontmatterRuntime: 1,
-      markdownBody: 1,
+      markdownBody: 2,
       test: 1,
       runtimeCode: 1,
     });
     assert.equal(parsed.items.some(item => item.kind === 'FRONTMATTER-RUNTIME'), true);
+    assert.equal(parsed.items.some(item => item.segments.length === 2), true);
     assert.equal(stdout.includes('/Users/example/'), false, 'JSON output must not echo local home paths');
     await assert.rejects(access(join(fixture.repo, '.git')), 'CLI portability classification must not initialize Git');
   } finally {
