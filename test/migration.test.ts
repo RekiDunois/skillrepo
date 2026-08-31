@@ -133,7 +133,11 @@ test('migration mechanically moves content, keeps runtime compatibility, and reg
       assert.match(agent, /^---\nname: worker\n/);
       assert.equal(await readFile(join(repo, 'agents', 'agent-helper.py'), 'utf8'), 'print("helper")\n');
       await assert.rejects(access(join(f.sourceRoot, 'agents', 'worker.md')));
-      await assert.rejects(access(join(f.sourceRoot, 'agents', 'agent-helper.py')));
+      assert.equal(
+        await readlink(join(f.sourceRoot, 'agents', 'agent-helper.py')),
+        join(repo, 'agents', 'agent-helper.py'),
+      );
+      assert.equal(await readFile(join(f.sourceRoot, 'agents', 'agent-helper.py'), 'utf8'), 'print("helper")\n');
       assert.equal(
         await readlink(join(f.sourceRoot, 'agents', 'demo-repo')),
         join(repo, 'agents'),
