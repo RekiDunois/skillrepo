@@ -73,6 +73,7 @@ const NOISE_DIRECTORIES = new Map<string, string>([
   ['.nox', '.nox/'],
   ['.cache', '.cache/'],
   ['.ms-playwright', '.ms-playwright/'],
+  ['chrome-profile', 'chrome-profile/'],
   ['playwright-report', 'playwright-report/'],
   ['test-results', 'test-results/'],
   ['htmlcov', 'htmlcov/'],
