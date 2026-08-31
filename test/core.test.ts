@@ -58,6 +58,7 @@ test('register is idempotent and unregister removes only registration', async ()
       const config = await readFile(join(f.configDir, 'opencode.jsonc'), 'utf8');
       const matches = config.match(new RegExp(join(f.repo, 'skills').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? [];
       assert.equal(matches.length, 1);
+      assert.deepEqual(JSON.parse(config).skills.paths, [join(f.repo, 'skills')]);
       assert.equal(await readlink(join(f.configDir, 'agents', 'example-repo')), join(f.repo, 'agents'));
 
       await unregisterRepo(f.repo);
