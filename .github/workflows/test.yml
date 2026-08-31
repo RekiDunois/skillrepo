@@ -307,7 +307,7 @@ jobs:
             --target-root "$RUNNER_TEMP/migration-repos" \
             --execute | grep -F '0 pattern(s) across 0 repo(s)'
 
-  unit-windows:
+  commit-readiness-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -315,4 +315,6 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - run: npm test
+      - run: npm run build
+      - name: Run Windows commit-readiness tests
+        run: node --test dist/test/git_ignore_batch.test.js dist/test/git_ignore_oracle.test.js dist/test/ignore.test.js dist/test/readiness.test.js
