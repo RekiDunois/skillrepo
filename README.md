@@ -29,9 +29,9 @@ By default, mutating commands run an OpenCode CLI post-check. `--no-verify` exis
 skillrepo register ./example --no-verify
 ```
 
-`doctor` checks filesystem/config linkage, verifies every skill ID found in configured `skills` sources against `opencode debug skill`, and invokes documented OpenCode CLI commands so errors can be separated into local registration problems versus OpenCode discovery/runtime problems.
+`doctor` checks filesystem/config linkage, requires at least one registered skill or agent target source, verifies every skill ID found in configured `skills` sources against `opencode debug skill`, and invokes documented OpenCode CLI commands so errors can be separated into local registration problems versus OpenCode discovery/runtime problems.
 
-## Thin migration apply
+## Transactional migration apply
 
 Migration execution is deliberately mechanical. Repository grouping belongs in `migration-plan.json`; `migration apply` does not regroup, infer dependencies, initialize Git repositories, commit, push, or manage remotes.
 
@@ -57,11 +57,15 @@ The current schema consumes repositories whose action is `CREATE_AND_MOVE` and m
 <sourceRoot>/<lib path>      -> <targetRoot>/<repo>/<lib path>
 ```
 
-Before the first rename, all sources and targets are preflighted. Duplicate/overlapping sources, missing sources, existing targets, symlink sources, unsafe paths, and cross-filesystem moves are blocked before mutation begins.
+`migration apply` is transactional. Before the first filesystem mutation it fixes the plan fingerprint, parses every migrated skill and Markdown agent with the OpenCode-compatible frontmatter parser, derives all skill IDs and agent names, checks duplicate names, path overlap, source types, target preconditions, and filesystem boundaries, and builds the prospective JSONC configuration in memory.
 
 After a skill directory moves, its old directory is recreated **without `SKILL.md`** and its remaining top-level runtime resources are symlinked to the new location. This keeps existing absolute paths such as `.../skill/foo/scripts/...` and `.../skill/foo/.venv/...` working without making OpenCode discover the same skill twice. Shared `lib/` paths get a direct compatibility symlink. Agent files do not get old-path symlinks because that would create duplicate agent discovery; missing agent frontmatter `name` is filled mechanically from the filename before registration.
 
-Finally, each new repo is registered through the normal `registerRepo` path. Unless `--no-verify` is used, the migration then requires the real OpenCode CLI to discover every migrated skill and agent. A failed OpenCode discovery check is reported as a migration failure; there is intentionally no separate migration dependency solver or semantic repair engine.
+Execution records a journal under `<sourceRoot>/.skillrepo-migrations/<transaction-id>.json`, takes a source-root lock, and first renames source entries into a transaction-owned staging directory. Target content and compatibility links are then committed, followed by repo-level agent links and one atomic JSON/JSONC replacement. The original config fingerprint and all source/target/link fingerprints are recorded in the journal.
+
+Unless `--no-verify` is used, fresh OpenCode processes check the complete expected skill and agent lists, target source configuration, and target readability. A failed preparation, registration, or discovery check rolls back the entire batch. Rollback only removes paths whose recorded owner, symlink target, and fingerprint still match; external changes produce `rollback-incomplete` and leave the journal and lock for manual recovery.
+
+`--resume` is journal-driven. A committed transaction is safely idempotent. An interrupted or `moved-uncommitted` transaction is first rolled back and reported as `rollback-complete`; missing or mismatched journals and fingerprints are never treated as proof that a path was migrated. Dry-run remains fully read-only and creates no lock, journal, staging directory, link, or config file.
 
 ## Development
 
