@@ -22,7 +22,7 @@ test('migration audit is read-only and reports privacy/commit blockers without e
   const targetRoot = join(root, 'repos');
   const repo = join(targetRoot, 'active-repo');
   const plan = join(root, 'migration-plan.json');
-  const fakeSecret = 'AKIA' + 'ABCDEFGHIJKLMNOP';
+  const fakeSecret = ['AKIA', 'ABCDEFGHIJKLMNOP'].join('');
 
   try {
     await fixturePlan(plan);
@@ -74,6 +74,7 @@ test('browser runtime profiles are pruned as a single ignore candidate', async (
   const repo = join(targetRoot, 'browser-repo');
   const plan = join(root, 'migration-plan.json');
   const profile = join(repo, 'skills', 'chrome-devtools', 'chrome-profile');
+  const fakeRuntimeToken = ['sk-', 'this-is-runtime-profile-data-not-source'].join('');
 
   try {
     await fixturePlan(plan, 'browser-repo');
@@ -82,7 +83,7 @@ test('browser runtime profiles are pruned as a single ignore candidate', async (
     await writeFile(join(profile, 'Default', 'Cache', 'cache.bin'), 'runtime cache\n', 'utf8');
     await writeFile(
       join(profile, 'WasmTtsEngine', 'fixture', 'voices.json'),
-      '{"voice":"sk-' + 'this-is-runtime-profile-data-not-source"}\n',
+      `${JSON.stringify({ voice: fakeRuntimeToken })}\n`,
       'utf8',
     );
 
