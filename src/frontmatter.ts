@@ -41,9 +41,13 @@ export function sanitizeOpenCodeFrontmatter(content: string): string {
 export function parseFrontmatter(content: string): FrontmatterDocument {
   let parsed;
   try {
-    parsed = matter(content);
+    // gray-matter only uses its global cache when options are omitted. Passing
+    // an empty options object avoids caching a half-parsed file before a YAML
+    // exception, which would otherwise poison a repeated parse of the same
+    // OpenCode-compatible frontmatter.
+    parsed = matter(content, {});
   } catch {
-    parsed = matter(sanitizeOpenCodeFrontmatter(content));
+    parsed = matter(sanitizeOpenCodeFrontmatter(content), {});
   }
 
   const data = parsed.data && typeof parsed.data === 'object' && !Array.isArray(parsed.data)
