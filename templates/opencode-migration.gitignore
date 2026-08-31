@@ -11,7 +11,7 @@
 **/.hg/
 **/.svn/
 
-# Dependency trees and interpreter caches. Keep manifests/lockfiles.
+# Dependency trees, interpreter caches, and local model/data caches. Keep manifests/lockfiles.
 **/node_modules/
 **/__pycache__/
 **/*.py[cod]
@@ -21,6 +21,8 @@
 **/.cache/
 **/.venv/
 **/venv/
+**/local_cache/
+**/local-cache/
 
 # Runtime browser profiles are local state and may contain cookies, history,
 # saved login data, extension state, and other account/session material.
@@ -88,12 +90,16 @@
 **/*.swo
 **/*~
 **/*.bak
+**/*.bak-*
+**/*.local-bak-*/
+**/*.broken-*
 **/*.orig
 **/*.rej
 **/.DS_Store
 **/Thumbs.db
 **/backup/
 **/backups/
+**/skill-bak/
 
 # Keep the skillrepo inventory in the synchronized snapshot.
 !.skillrepo-inventory/
