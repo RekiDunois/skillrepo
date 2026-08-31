@@ -30,7 +30,7 @@ async function writePlan(path: string, sourceRoot: string): Promise<void> {
         id: 'demo-repo',
         action: 'CREATE_AND_MOVE',
         skills: ['alpha'],
-        agents: ['worker.md'],
+        agents: ['worker.md', 'agent-helper.py'],
         libs: ['lib/shared.js'],
       },
       {
@@ -75,6 +75,7 @@ async function fixture(): Promise<{
     '---\ndescription: test\nmode: subagent\n---\nworker body\n',
     'utf8',
   );
+  await writeFile(join(sourceRoot, 'agents', 'agent-helper.py'), 'print("helper")\n', 'utf8');
   await writeFile(join(sourceRoot, 'lib', 'shared.js'), 'export const answer = 42;\n', 'utf8');
   await writePlan(planPath, sourceRoot);
 
@@ -92,7 +93,7 @@ test('migration dry-run performs no writes', async () => {
         verify: false,
       });
       assert.equal(result.dryRun, true);
-      assert.equal(result.moves.length, 3);
+      assert.equal(result.moves.length, 4);
       await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
       await assert.rejects(access(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md')));
     });
@@ -130,7 +131,9 @@ test('migration mechanically moves content, keeps runtime compatibility, and reg
 
       const agent = await readFile(join(repo, 'agents', 'worker.md'), 'utf8');
       assert.match(agent, /^---\nname: worker\n/);
+      assert.equal(await readFile(join(repo, 'agents', 'agent-helper.py'), 'utf8'), 'print("helper")\n');
       await assert.rejects(access(join(f.sourceRoot, 'agents', 'worker.md')));
+      await assert.rejects(access(join(f.sourceRoot, 'agents', 'agent-helper.py')));
       assert.equal(
         await readlink(join(f.sourceRoot, 'agents', 'demo-repo')),
         join(repo, 'agents'),
@@ -160,6 +163,7 @@ test('migration preflight blocks target collisions before moving anything', asyn
       );
       await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
       await access(join(f.sourceRoot, 'agents', 'worker.md'));
+      await access(join(f.sourceRoot, 'agents', 'agent-helper.py'));
       await access(join(f.sourceRoot, 'lib', 'shared.js'));
     });
   } finally {
