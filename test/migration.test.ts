@@ -94,6 +94,7 @@ test('migration dry-run performs no writes', async () => {
       });
       assert.equal(result.dryRun, true);
       assert.equal(result.moves.length, 4);
+      assert.equal(result.resumedMoves.length, 0);
       await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
       await assert.rejects(access(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md')));
     });
@@ -169,6 +170,78 @@ test('migration preflight blocks target collisions before moving anything', asyn
       await access(join(f.sourceRoot, 'agents', 'worker.md'));
       await access(join(f.sourceRoot, 'agents', 'agent-helper.py'));
       await access(join(f.sourceRoot, 'lib', 'shared.js'));
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration validates YAML frontmatter before the first rename', async () => {
+  const f = await fixture();
+  try {
+    const skill = join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md');
+    await writeFile(
+      skill,
+      '---\nname: alpha\ndescription: [deprecated] text after flow sequence\ndisable-model-invocation: true\n---\n',
+      'utf8',
+    );
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({
+          planPath: f.planPath,
+          targetRoot: f.targetRoot,
+          verify: false,
+        }),
+        error => {
+          assert.match(String(error), /alpha[/\\]SKILL\.md/);
+          assert.match(String(error), /invalid YAML frontmatter/);
+          return true;
+        },
+      );
+
+      await access(skill);
+      await access(join(f.sourceRoot, 'agents', 'worker.md'));
+      await access(join(f.sourceRoot, 'agents', 'agent-helper.py'));
+      await access(join(f.sourceRoot, 'lib', 'shared.js'));
+      await assert.rejects(access(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md')));
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration resume recognizes skillrepo-produced moved state and re-registers idempotently', async () => {
+  const f = await fixture();
+  try {
+    await withConfigDir(f.sourceRoot, async () => {
+      await applyMigration({
+        planPath: f.planPath,
+        targetRoot: f.targetRoot,
+        verify: false,
+      });
+
+      const dryRun = await applyMigration({
+        planPath: f.planPath,
+        targetRoot: f.targetRoot,
+        dryRun: true,
+        resume: true,
+        verify: false,
+      });
+      assert.equal(dryRun.resumedMoves.length, 4);
+
+      const resumed = await applyMigration({
+        planPath: f.planPath,
+        targetRoot: f.targetRoot,
+        resume: true,
+        verify: false,
+      });
+      assert.equal(resumed.resumedMoves.length, 4);
+      await access(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md'));
+      assert.equal(
+        await readlink(join(f.sourceRoot, 'agents', 'agent-helper.py')),
+        join(f.targetRoot, 'demo-repo', 'agents', 'agent-helper.py'),
+      );
     });
   } finally {
     await rm(f.root, { recursive: true, force: true });
