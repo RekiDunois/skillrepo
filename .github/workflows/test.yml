@@ -107,3 +107,76 @@ jobs:
           skillrepo unregister "$RUNNER_TEMP/fixture-repo"
           ! opencode debug skill | grep -F 'fixture-skill'
           ! opencode agent list | grep -F 'fixture-worker'
+      - name: Build migration fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/migration-opencode"
+          mkdir -p "$source/skill/migrated-skill/scripts" "$source/agents" "$source/lib"
+          cat > "$source/skill/migrated-skill/SKILL.md" <<'EOF'
+          ---
+          name: migrated-skill
+          description: migration CI fixture skill
+          ---
+          Migration fixture.
+          EOF
+          cat > "$source/skill/migrated-skill/scripts/run.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          echo migrated-runtime-ok
+          EOF
+          chmod +x "$source/skill/migrated-skill/scripts/run.sh"
+          cat > "$source/agents/migrated-worker.md" <<'EOF'
+          ---
+          description: migration CI fixture agent
+          mode: subagent
+          ---
+          Migration fixture.
+          EOF
+          printf 'export const migrated = true;\n' > "$source/lib/migrated.js"
+          cat > "$RUNNER_TEMP/migration-plan.json" <<EOF
+          {
+            "schemaVersion": 1,
+            "generatedFrom": { "sourceRoot": "$source" },
+            "repositories": [
+              {
+                "id": "migrated-repo",
+                "action": "CREATE_AND_MOVE",
+                "skills": ["migrated-skill"],
+                "agents": ["migrated-worker.md"],
+                "libs": ["lib/migrated.js"]
+              }
+            ]
+          }
+          EOF
+      - name: Verify migration dry-run is read-only
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/migration-opencode
+        run: |
+          set -euo pipefail
+          skillrepo migration apply \
+            --plan "$RUNNER_TEMP/migration-plan.json" \
+            --target-root "$RUNNER_TEMP/migration-repos"
+          test -f "$RUNNER_TEMP/migration-opencode/skill/migrated-skill/SKILL.md"
+          test ! -e "$RUNNER_TEMP/migration-repos/migrated-repo/skills/migrated-skill/SKILL.md"
+      - name: Verify migrated components through OpenCode
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/migration-opencode
+        run: |
+          set -euo pipefail
+          skillrepo migration apply \
+            --plan "$RUNNER_TEMP/migration-plan.json" \
+            --target-root "$RUNNER_TEMP/migration-repos" \
+            --execute
+          opencode debug skill | grep -F 'migrated-skill'
+          opencode agent list | grep -F 'migrated-worker'
+          test -f "$RUNNER_TEMP/migration-repos/migrated-repo/skills/migrated-skill/SKILL.md"
+          test -f "$RUNNER_TEMP/migration-repos/migrated-repo/agents/migrated-worker.md"
+          grep -F 'name: migrated-worker' "$RUNNER_TEMP/migration-repos/migrated-repo/agents/migrated-worker.md"
+          test ! -e "$RUNNER_TEMP/migration-opencode/skill/migrated-skill/SKILL.md"
+          test -L "$RUNNER_TEMP/migration-opencode/skill/migrated-skill/scripts"
+          test -L "$RUNNER_TEMP/migration-opencode/lib/migrated.js"
+          "$RUNNER_TEMP/migration-opencode/skill/migrated-skill/scripts/run.sh" | grep -F 'migrated-runtime-ok'
+          skillrepo doctor
