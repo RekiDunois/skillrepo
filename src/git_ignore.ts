@@ -29,8 +29,8 @@ async function runProcess(
       env: options.env,
       stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
-    child.stdout.on('data', data => stdout += data);
-    child.stderr.on('data', data => stderr += data);
+    child.stdout?.on('data', data => stdout += data);
+    child.stderr?.on('data', data => stderr += data);
     child.once('error', reject);
     child.once('close', (code, signal) => {
       if (signal) {
@@ -153,8 +153,7 @@ export async function probeIgnoredPaths(
       { cwd: repoRoot, env, input: `${unique.join('\0')}\0` },
     );
     if (result.code !== 0 && result.code !== 1) {
-      throw new Error(`Git check-ignore failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`,
-      );
+      throw new Error(`Git check-ignore failed: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.code}`}`);
     }
     for (const relPath of result.stdout.split('\0')) if (relPath) ignored.add(relPath);
     return ignored;
