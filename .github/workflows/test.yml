@@ -1,0 +1,64 @@
+name: test
+
+on:
+  push:
+    branches: [main, bootstrap]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm test
+      - name: Install OpenCode
+        run: npm install -g opencode-ai
+      - name: Build fixture repo
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/fixture-repo"
+          mkdir -p "$repo/skills/fixture-skill" "$repo/agents"
+          cat > "$repo/skills/fixture-skill/SKILL.md" <<'EOF'
+          ---
+          name: fixture-skill
+          description: CI fixture skill
+          ---
+          Test fixture.
+          EOF
+          cat > "$repo/agents/fixture-worker.md" <<'EOF'
+          ---
+          name: fixture-worker
+          description: CI fixture agent
+          mode: subagent
+          ---
+          Test fixture.
+          EOF
+      - name: Register fixture with normal post-check
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: node dist/src/cli.js register "$RUNNER_TEMP/fixture-repo"
+      - name: Verify agent discovery through OpenCode
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: opencode agent list | grep -F 'fixture-worker'
+      - name: Probe skill discovery through OpenCode
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: |
+          set -euo pipefail
+          opencode debug skill | grep -F 'fixture-skill'
+      - name: Verify unregister
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: |
+          node dist/src/cli.js unregister "$RUNNER_TEMP/fixture-repo"
+          ! opencode agent list | grep -F 'fixture-worker'
