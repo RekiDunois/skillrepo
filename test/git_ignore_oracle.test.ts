@@ -1,14 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
+import { promisify } from 'node:util';
 import { auditMigrationRepos } from '../src/audit.js';
 import { applyMigrationIgnores } from '../src/ignore.js';
 import { classifyMigrationPortability } from '../src/portability.js';
+import { applyMigrationPortabilityFixes } from '../src/portability_fix.js';
 import { auditMigrationCommitReadiness } from '../src/readiness.js';
+
+const execFileAsync = promisify(execFile);
 
 async function writePlan(path: string, repoId: string): Promise<void> {
   await writeFile(path, `${JSON.stringify({ schemaVersion: 1, repositories: [{ id: repoId, action: 'CREATE_AND_MOVE' }] }, null, 2)}\n`, 'utf8');
@@ -46,6 +51,17 @@ test('Git preflight fails before plan scanning when Git is unavailable', async (
   );
 });
 
+test('portability fix preflights Git before reading the migration plan', async () => {
+  await assert.rejects(
+    applyMigrationPortabilityFixes({
+      planPath: '/definitely/missing/migration-plan.json',
+      targetRoot: '/definitely/missing/repos',
+      env: { ...process.env, PATH: '' },
+    }),
+    /Git is required.*unavailable/i,
+  );
+});
+
 test('explicit Git path works when ordinary PATH lookup is unavailable', async () => {
   const gitPath = await locateGit();
   const f = await fixture('skillrepo-git-explicit-', 'explicit-repo');
@@ -59,6 +75,25 @@ test('explicit Git path works when ordinary PATH lookup is unavailable', async (
       env: { ...process.env, PATH: '' },
     });
     assert.equal(result.readyForInitialCommit, true);
+    await assert.rejects(access(join(f.repo, '.git')));
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});
+
+test('CLI explicit --git path works when ordinary Git lookup is unavailable', async () => {
+  const gitPath = await locateGit();
+  const f = await fixture('skillrepo-git-cli-explicit-', 'cli-explicit-repo');
+  try {
+    await mkdir(join(f.repo, '.venv'));
+    await writeFile(join(f.repo, '.gitignore'), '.venv/\n', 'utf8');
+    const cli = join(process.cwd(), 'dist', 'src', 'cli.js');
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      [cli, 'migration', 'audit', '--plan', f.plan, '--target-root', f.targetRoot, '--git', gitPath, '--json'],
+      { env: { ...process.env, PATH: '' } },
+    );
+    assert.equal(stderr, '');
+    const parsed = JSON.parse(stdout) as { readyForInitialCommit: boolean };
+    assert.equal(parsed.readyForInitialCommit, true);
     await assert.rejects(access(join(f.repo, '.git')));
   } finally { await rm(f.root, { recursive: true, force: true }); }
 });
