@@ -41,18 +41,16 @@ const SAFE_AUTO_IGNORE_PATTERNS = new Set([
   '.ms-playwright/',
   'chrome-profile/',
   '.DS_Store',
-  '[Tt][Hh][Uu][Mm][Bb][Ss].[Dd][Bb]',
-  '*.[Pp][Yy][CcOoDd]',
-  '*.[Ll][Oo][Gg]',
-  '*.[Tt][Mm][Pp]',
-  '*.[Tt][Ee][Mm][Pp]',
-  '*.[Ss][Ww][Pp]',
-  '*.[Ss][Ww][Oo]',
   '.coverage',
-  '[Cc][Oo][Vv][Ee][Rr][Aa][Gg][Ee].[Xx][Mm][Ll]',
-  '*[Dd][Ee][Bb][Uu][Gg].[Ll][Oo][Gg]*',
-  '[Yy][Aa][Rr][Nn]-[Ee][Rr][Rr][Oo][Rr].[Ll][Oo][Gg]*',
 ]);
+
+function isSafeAutoIgnorePattern(pattern: string): boolean {
+  if (SAFE_AUTO_IGNORE_PATTERNS.has(pattern)) return true;
+  const lower = pattern.toLowerCase();
+  if (lower === 'thumbs.db' || lower === 'coverage.xml') return true;
+  if (/^\*\.(?:pyc|pyo|pyd|log|tmp|temp|swp|swo)$/.test(lower)) return true;
+  return /^(?:npm-debug|yarn-debug|yarn-error|pnpm-debug)\.log$/.test(lower);
+}
 
 function errnoCode(error: unknown): string | undefined {
   return error && typeof error === 'object' && 'code' in error ? String((error as NodeJS.ErrnoException).code) : undefined;
@@ -129,7 +127,7 @@ export async function applyMigrationIgnores(options: {
     if (!repo.exists) continue;
     const gitignorePath = join(repo.repoPath, '.gitignore');
     const candidates = repo.ignoreCandidates
-      .filter(candidate => SAFE_AUTO_IGNORE_PATTERNS.has(candidate.pattern))
+      .filter(candidate => isSafeAutoIgnorePattern(candidate.pattern))
       .sort((left, right) => comparePatterns(left.pattern, right.pattern));
     const patterns = candidates.map(candidate => candidate.pattern);
     if (!patterns.length) continue;
