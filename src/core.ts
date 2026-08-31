@@ -528,17 +528,27 @@ async function doctorStaticIssues(): Promise<string[]> {
       const path = join(agentRoot, entry.name);
       if (entry.isSymbolicLink()) {
         const target = resolve(agentRoot, await readlink(path));
-        if (!(await directoryExists(target))) {
+        if (!(await exists(target))) {
           issues.push(`Broken agent symlink: ${path} -> ${target}`);
           continue;
         }
-        const result = await collectAgentNames(target, false);
-        issues.push(...result.issues);
-        for (const name of result.names) {
-          const previous = seenAgents.get(name);
-          if (previous && previous !== target) issues.push(`Duplicate agent name '${name}': ${previous} and ${target}`);
-          else seenAgents.set(name, target);
+        if (await directoryExists(target)) {
+          const result = await collectAgentNames(target, false);
+          issues.push(...result.issues);
+          for (const name of result.names) {
+            const previous = seenAgents.get(name);
+            if (previous && previous !== target) issues.push(`Duplicate agent name '${name}': ${previous} and ${target}`);
+            else seenAgents.set(name, target);
+          }
+          continue;
         }
+        if (!entry.name.endsWith('.md')) continue;
+        const meta = frontmatter(await readFile(path, 'utf8'));
+        const name = typeof meta.name === 'string' ? meta.name.trim() : '';
+        if (!name) continue;
+        const previous = seenAgents.get(name);
+        if (previous && previous !== path) issues.push(`Duplicate agent name '${name}': ${previous} and ${path}`);
+        else seenAgents.set(name, path);
       } else if (entry.isFile() && entry.name.endsWith('.md')) {
         const meta = frontmatter(await readFile(path, 'utf8'));
         const name = typeof meta.name === 'string' ? meta.name.trim() : '';
