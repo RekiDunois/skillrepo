@@ -29,7 +29,7 @@ By default, mutating commands run an OpenCode CLI post-check. `--no-verify` exis
 skillrepo register ./example --no-verify
 ```
 
-`doctor` checks filesystem/config linkage and invokes documented OpenCode CLI commands so errors can be separated into local registration problems versus OpenCode discovery/runtime problems.
+`doctor` checks filesystem/config linkage, verifies every skill ID found in configured `skills` sources against `opencode debug skill`, and invokes documented OpenCode CLI commands so errors can be separated into local registration problems versus OpenCode discovery/runtime problems.
 
 ## Thin migration apply
 
