@@ -3,6 +3,7 @@ import { access, lstat, readFile, readdir, readlink, stat } from 'node:fs/promis
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { preflightGit, probeIgnoredPaths, type GitIgnoreRuntime } from './git_ignore.js';
 
 export type AuditSeverity = 'blocker' | 'review';
 
@@ -55,8 +56,6 @@ type MinimalMigrationPlan = { schemaVersion: number; repositories: MinimalRepoPl
 
 type MutableRepoAudit = Omit<RepoAudit, 'ignoreCandidates' | 'readyForInitialCommit'> & {
   ignoreMap: Map<string, Set<string>>;
-  existingIgnorePatterns: Set<string>;
-  existingIgnoreHasNegation: boolean;
 };
 
 const BLOCKER_BYTES = 100 * 1024 * 1024;
@@ -107,6 +106,10 @@ async function exists(path: string): Promise<boolean> {
   try { await access(path, constants.F_OK); return true; } catch { return false; }
 }
 
+function errnoCode(error: unknown): string | undefined {
+  return error && typeof error === 'object' && 'code' in error ? String((error as NodeJS.ErrnoException).code) : undefined;
+}
+
 function toPosix(path: string): string { return path.split(sep).join('/'); }
 function repoRelative(repoRoot: string, path: string): string { return toPosix(relative(repoRoot, path)) || '.'; }
 function within(root: string, path: string): boolean {
@@ -119,15 +122,9 @@ function addFinding(audit: MutableRepoAudit, finding: AuditFinding): void {
 }
 
 function addIgnore(audit: MutableRepoAudit, pattern: string, path: string): void {
-  if (!audit.existingIgnoreHasNegation && audit.existingIgnorePatterns.has(pattern)) return;
   const paths = audit.ignoreMap.get(pattern) ?? new Set<string>();
   paths.add(path);
   audit.ignoreMap.set(pattern, paths);
-}
-
-function parseExistingIgnore(text: string): { patterns: Set<string>; hasNegation: boolean } {
-  const rules = text.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith('#'));
-  return { patterns: new Set(rules), hasNegation: rules.some(line => line.startsWith('!')) };
 }
 
 function sensitivePathFinding(relPath: string): AuditFinding | null {
@@ -178,7 +175,9 @@ function scanTextContent(audit: MutableRepoAudit, relPath: string, text: string)
     addFinding(audit, { severity: 'review', code: 'credential-like-literal', path: relPath, detail: 'credential-like assignment contains a non-placeholder literal; value is intentionally not shown' });
     break;
   }
-  if (/\/Users\/[^/\s'"`]+\/|\/home\/[^/\s'"`]+\/|[A-Za-z]:\\Users\\[^\\\s'"`]+\\/.test(text)) addFinding(audit, { severity: 'review', code: 'absolute-home-path', path: relPath, detail: 'contains an absolute user-home path; review for privacy and portability' });
+  if (/\/Users\/[^/\s'"`]+\/|\/home\/[^/\s'"`]+\/|[A-Za-z]:[\\/]Users[\\/][^\\/\s'"`]+[\\/]/i.test(text)) {
+    addFinding(audit, { severity: 'review', code: 'absolute-home-path', path: relPath, detail: 'contains an absolute user-home path; review for privacy and portability' });
+  }
 }
 
 async function scanTextFile(audit: MutableRepoAudit, relPath: string, path: string): Promise<void> {
@@ -206,11 +205,8 @@ async function scanEntry(audit: MutableRepoAudit, repoRoot: string, path: string
   const base = basename(path);
   if (base === '.git') {
     const rootGit = relPath === '.git';
-    if (rootGit) {
-      addFinding(audit, { severity: 'review', code: 'git-already-initialized', path: relPath, detail: 'repository already contains Git metadata or worktree linkage' });
-    } else {
-      addFinding(audit, { severity: 'blocker', code: 'embedded-git', path: relPath, detail: 'nested Git metadata would create ambiguous provenance or an embedded-repository gitlink' });
-    }
+    if (rootGit) addFinding(audit, { severity: 'review', code: 'git-already-initialized', path: relPath, detail: 'repository already contains Git metadata or worktree linkage' });
+    else addFinding(audit, { severity: 'blocker', code: 'embedded-git', path: relPath, detail: 'nested Git metadata would create ambiguous provenance or an embedded-repository gitlink' });
     if (!entryStat.isDirectory()) {
       if (entryStat.isSymbolicLink()) audit.stats.symlinks += 1;
       else if (entryStat.isFile()) { audit.stats.files += 1; audit.stats.bytes += entryStat.size; }
@@ -269,40 +265,46 @@ async function readPlan(planPath: string): Promise<MinimalMigrationPlan> {
   return { schemaVersion: 1, repositories };
 }
 
-async function auditRepo(repoId: string, targetRoot: string): Promise<RepoAudit> {
+async function auditRepo(repoId: string, targetRoot: string, git: GitIgnoreRuntime): Promise<RepoAudit> {
   const repoPath = resolve(targetRoot, repoId);
   const repoExists = await exists(repoPath);
-  const mutable: MutableRepoAudit = { repoId, repoPath, exists: repoExists, gitignorePresent: false, stats: { files: 0, directories: 0, symlinks: 0, bytes: 0, prunedNoiseDirectories: 0 }, findings: [], ignoreMap: new Map(), existingIgnorePatterns: new Set(), existingIgnoreHasNegation: false };
+  const mutable: MutableRepoAudit = { repoId, repoPath, exists: repoExists, gitignorePresent: false, stats: { files: 0, directories: 0, symlinks: 0, bytes: 0, prunedNoiseDirectories: 0 }, findings: [], ignoreMap: new Map() };
   if (!repoExists) addFinding(mutable, { severity: 'blocker', code: 'missing-repository', path: '.', detail: 'planned migrated repository does not exist at the target root' });
   else {
     const rootStat = await lstat(repoPath);
     if (!rootStat.isDirectory()) addFinding(mutable, { severity: 'blocker', code: 'repository-not-directory', path: '.', detail: 'planned repository path is not a directory' });
     else {
-      const gitignore = join(repoPath, '.gitignore');
-      if (await exists(gitignore)) {
-        mutable.gitignorePresent = true;
-        const parsed = parseExistingIgnore(await readFile(gitignore, 'utf8'));
-        mutable.existingIgnorePatterns = parsed.patterns;
-        mutable.existingIgnoreHasNegation = parsed.hasNegation;
-        if (parsed.hasNegation) addFinding(mutable, { severity: 'review', code: 'gitignore-negation-present', path: '.gitignore', detail: 'existing .gitignore contains negation/override rules; effective ignore semantics require review' });
-      }
+      try { await lstat(join(repoPath, '.gitignore')); mutable.gitignorePresent = true; }
+      catch (error) { if (errnoCode(error) !== 'ENOENT') throw error; }
       for (const entry of await readdir(repoPath, { withFileTypes: true })) await scanEntry(mutable, repoPath, join(repoPath, entry.name));
     }
   }
   for (const finding of mutable.findings) if (finding.suggestedIgnore) addIgnore(mutable, finding.suggestedIgnore, finding.path);
-  const ignoreCandidates = [...mutable.ignoreMap.entries()].map(([pattern, paths]) => ({ pattern, paths: [...paths].sort() })).sort((left, right) => left.pattern.localeCompare(right.pattern));
+
+  const allCandidatePaths = [...mutable.ignoreMap.values()].flatMap(paths => [...paths]);
+  const effectivelyIgnored = repoExists ? await probeIgnoredPaths(git, repoPath, allCandidatePaths) : new Set<string>();
+  const ignoreCandidates = [...mutable.ignoreMap.entries()]
+    .map(([pattern, paths]) => ({ pattern, paths: [...paths].filter(path => !effectivelyIgnored.has(path)).sort() }))
+    .filter(candidate => candidate.paths.length > 0)
+    .sort((left, right) => left.pattern.localeCompare(right.pattern));
   const findings = [...mutable.findings].sort((left, right) => left.severity !== right.severity ? (left.severity === 'blocker' ? -1 : 1) : left.path.localeCompare(right.path) || left.code.localeCompare(right.code));
   return { repoId, repoPath, exists: mutable.exists, gitignorePresent: mutable.gitignorePresent, stats: mutable.stats, findings, ignoreCandidates, readyForInitialCommit: findings.length === 0 && ignoreCandidates.length === 0 };
 }
 
-export async function auditMigrationRepos(options: { planPath: string; targetRoot: string }): Promise<MigrationAuditResult> {
+export async function auditMigrationRepos(options: {
+  planPath: string;
+  targetRoot: string;
+  gitPath?: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<MigrationAuditResult> {
+  const git = await preflightGit(options.gitPath ?? 'git', options.env ?? process.env);
   const planPath = resolve(expandHome(options.planPath));
   const targetRoot = resolve(expandHome(options.targetRoot));
   const plan = await readPlan(planPath);
   const repoIds = [...new Set(plan.repositories.filter(repo => repo.action === 'CREATE_AND_MOVE').map(repo => repo.id))];
   if (!repoIds.length) throw new Error('Migration plan has no CREATE_AND_MOVE repositories to audit');
   const repositories: RepoAudit[] = [];
-  for (const repoId of repoIds) repositories.push(await auditRepo(repoId, targetRoot));
+  for (const repoId of repoIds) repositories.push(await auditRepo(repoId, targetRoot, git));
   const blockers = repositories.reduce((sum, repo) => sum + repo.findings.filter(finding => finding.severity === 'blocker').length, 0);
   const reviews = repositories.reduce((sum, repo) => sum + repo.findings.filter(finding => finding.severity === 'review').length, 0);
   const ignorePatterns = repositories.reduce((sum, repo) => sum + repo.ignoreCandidates.length, 0);
@@ -317,10 +319,11 @@ export function renderMigrationAudit(result: MigrationAuditResult): string {
     const status = repo.readyForInitialCommit ? 'READY' : blockers ? 'BLOCKED' : 'REVIEW';
     lines.push(`${repo.repoId}: ${status} (${blockers} blocker, ${reviews} review, ${repo.ignoreCandidates.length} ignore suggestion)`);
     for (const finding of repo.findings) lines.push(`  [${finding.severity === 'blocker' ? 'BLOCK' : 'REVIEW'}] ${finding.path} — ${finding.code}: ${finding.detail}`);
-    for (const candidate of repo.ignoreCandidates) { const example = candidate.paths.slice(0, 3).join(', '); const more = candidate.paths.length > 3 ? ` (+${candidate.paths.length - 3} more)` : ''; lines.push(`  [IGNORE] ${candidate.pattern} — observed: ${example}${more}`); }
+    for (const candidate of repo.ignoreCandidates) { const example = candidate.paths.slice(0, 3).join(', '); const more = candidate.paths.length > 3 ? ` (+${candidate.paths.length - 3} more)` : ''; lines.push(`  [IGNORE] ${candidate.pattern} — observed unignored: ${example}${more}`); }
   }
   lines.push(`Summary: ${result.summary.blockers} blocker(s), ${result.summary.reviews} review item(s), ${result.summary.ignorePatterns} ignore suggestion(s)`);
   lines.push(`COMMIT-READY: ${result.readyForInitialCommit ? 'YES' : 'NO'}`);
+  lines.push('Effective ignore decisions were delegated to Git; skillrepo did not interpret .gitignore semantics.');
   lines.push('Read-only audit: no .gitignore, Git metadata, or repository contents were changed.');
   return lines.join('\n');
 }
