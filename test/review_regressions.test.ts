@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { auditMigrationRepos } from '../src/audit.js';
 import { applyMigrationIgnores } from '../src/ignore.js';
 import { applyMigrationPortabilityFixes } from '../src/portability_fix.js';
+import { auditMigrationCommitReadiness } from '../src/readiness.js';
 import { resolveRegisteredResource } from '../src/runtime.js';
 
 async function writePlan(path: string, repoId: string, sourceRoot: string, skills: string[] = []): Promise<void> {
@@ -34,6 +35,23 @@ test('commit-readiness streaming scan catches 2-10 MiB secrets', async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('streaming scan reports review when text-candidate content contains NUL', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-nul-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'nul-repo'); const plan = join(root, 'migration-plan.json');
+  try {
+    await mkdir(repo, { recursive: true }); await writePlan(plan, 'nul-repo', '/unused'); await writeFile(join(repo, 'payload.txt'), Buffer.concat([Buffer.from('prefix\0'), Buffer.from('AKIA' + 'ABCDEFGHIJKLMNOP\n')]));
+    const result = await auditMigrationRepos({ planPath: plan, targetRoot }); const audited = result.repositories[0]!; assert.ok(audited.findings.some(item => item.code === 'content-scan-skipped' && item.severity === 'review')); assert.equal(result.readyForInitialCommit, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('streaming scan reports review when a text-candidate file is unreadable', async t => {
+  if (process.platform === 'win32' || process.getuid?.() === 0) { t.skip('permission-based unreadable fixture is not reliable on this platform/user'); return; }
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-unreadable-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'unreadable-repo'); const plan = join(root, 'migration-plan.json'); const file = join(repo, 'payload.txt');
+  try {
+    await mkdir(repo, { recursive: true }); await writePlan(plan, 'unreadable-repo', '/unused'); await writeFile(file, 'secret-looking content\n', 'utf8'); await chmod(file, 0o000);
+    const result = await auditMigrationRepos({ planPath: plan, targetRoot }); const audited = result.repositories[0]!; assert.ok(audited.findings.some(item => item.code === 'content-scan-failed' && item.severity === 'review')); assert.equal(result.readyForInitialCommit, false);
+  } finally { try { await chmod(file, 0o600); } catch {} await rm(root, { recursive: true, force: true }); }
+});
+
 test('ambiguous coverage directory is scanned and never auto-ignored by basename', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-ignore-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'coverage-repo'); const plan = join(root, 'migration-plan.json'); const gitignore = join(repo, '.gitignore');
   try {
@@ -41,6 +59,33 @@ test('ambiguous coverage directory is scanned and never auto-ignored by basename
     const audit = await auditMigrationRepos({ planPath: plan, targetRoot }); const audited = audit.repositories[0]!; assert.equal(audited.stats.files, 1); assert.equal(audited.stats.prunedNoiseDirectories, 0); assert.equal(audited.ignoreCandidates.some(item => item.pattern === 'coverage/'), false); assert.equal(audited.readyForInitialCommit, true);
     const ignore = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }); assert.equal(ignore.patterns, 0); await assert.rejects(access(gitignore));
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('migration ignore refuses a symlinked .gitignore and does not modify its target', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-ignore-symlink-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'ignore-repo'); const plan = join(root, 'migration-plan.json'); const outside = join(root, 'shared-ignore');
+  try {
+    await mkdir(join(repo, '__pycache__'), { recursive: true }); await writePlan(plan, 'ignore-repo', '/unused'); await writeFile(outside, '# shared\n', 'utf8'); await symlink(outside, join(repo, '.gitignore'));
+    await assert.rejects(applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }), /non-regular \.gitignore/); assert.equal(await readFile(outside, 'utf8'), '# shared\n');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('commit readiness does not trust an ignore rule when .gitignore contains negation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-ignore-negation-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'negation-repo'); const plan = join(root, 'migration-plan.json');
+  try {
+    await mkdir(join(repo, '.venv'), { recursive: true }); await writePlan(plan, 'negation-repo', '/unused'); await writeFile(join(repo, '.gitignore'), '.venv/\n!.venv/\n', 'utf8');
+    const result = await auditMigrationCommitReadiness({ planPath: plan, targetRoot }); const audited = result.repositories[0]!; assert.ok(audited.findings.some(item => item.code === 'gitignore-negation-present')); assert.ok(audited.findings.some(item => item.code === 'local-runtime-environment')); assert.ok(audited.ignoreCandidates.some(item => item.pattern === '.venv/')); assert.equal(result.readyForInitialCommit, false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('root .git file and symlink are recognized as existing Git metadata', async () => {
+  for (const kind of ['file', 'symlink'] as const) {
+    const root = await mkdtemp(join(tmpdir(), `skillrepo-review-root-git-${kind}-`)); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, `${kind}-repo`); const plan = join(root, 'migration-plan.json');
+    try {
+      await mkdir(repo, { recursive: true }); await writePlan(plan, `${kind}-repo`, '/unused');
+      if (kind === 'file') await writeFile(join(repo, '.git'), 'gitdir: /tmp/worktree\n', 'utf8'); else { const target = join(root, 'git-metadata'); await mkdir(target); await symlink(target, join(repo, '.git')); }
+      const result = await auditMigrationRepos({ planPath: plan, targetRoot }); assert.ok(result.repositories[0]!.findings.some(item => item.code === 'git-already-initialized' && item.path === '.git')); assert.equal(result.readyForInitialCommit, false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 async function buildPortabilityFixture(root: string): Promise<{ targetRoot: string; repo: string; plan: string; skillFile: string }> {
@@ -55,6 +100,16 @@ test('portability fix rewrites shared MCP executables by entry', async () => {
   try {
     const fixture = await buildPortabilityFixture(root); const env = await registerSkills(join(root, 'opencode'), join(fixture.repo, 'skills')); const result = await applyMigrationPortabilityFixes({ planPath: fixture.plan, targetRoot: fixture.targetRoot, dryRun: false, env });
     assert.equal(result.summary.autoActions, 2); assert.equal(result.summary.changedFiles, 1); const text = await readFile(fixture.skillFile, 'utf8'); assert.match(text, /command: \["skillrepo","exec","portable-repo","skills\/tool\/scripts\/server\.sh","--one"\]/); assert.match(text, /command: \["skillrepo","exec","portable-repo","skills\/tool\/scripts\/server\.sh","--two"\]/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('portability fix ignores nested same-name MCP keys and rewrites the direct entry', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-nested-mcp-'));
+  try {
+    const fixture = await buildPortabilityFixture(root); const server = join(homedir(), '.config', 'opencode', 'skill', 'tool', 'scripts', 'server.sh');
+    await writeFile(fixture.skillFile, ['---','name: demo','mcp:','  first:','    options:','      second:',`        command: [${JSON.stringify(server)}, "--nested"]`,'  second:',`    command: [${JSON.stringify(server)}, "--actual"]`,'---','Body.',''].join('\n'), 'utf8');
+    const env = await registerSkills(join(root, 'opencode'), join(fixture.repo, 'skills')); const result = await applyMigrationPortabilityFixes({ planPath: fixture.plan, targetRoot: fixture.targetRoot, dryRun: false, env });
+    assert.equal(result.summary.autoActions, 1); const text = await readFile(fixture.skillFile, 'utf8'); assert.match(text, new RegExp(`command: \\[${JSON.stringify(server).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, \\"--nested\\"\\]`)); assert.match(text, /command: \["skillrepo","exec","portable-repo","skills\/tool\/scripts\/server\.sh","--actual"\]/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
