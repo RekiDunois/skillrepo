@@ -108,9 +108,14 @@ export async function applyMigrationIgnores(options: {
     const gitignorePath = join(repo.repoPath, '.gitignore');
     const current = await readGitignore(gitignorePath);
     const present = existingPatterns(current.text);
+
+    // Negation makes effective ignore semantics order-dependent. Do not append any
+    // generated rules, because doing so could override an explicit user exception.
+    if (present.hasNegation) continue;
+
     const patterns = repo.ignoreCandidates
       .map(candidate => candidate.pattern)
-      .filter(pattern => SAFE_AUTO_IGNORE_PATTERNS.has(pattern) && (present.hasNegation || !present.patterns.has(pattern)))
+      .filter(pattern => SAFE_AUTO_IGNORE_PATTERNS.has(pattern) && !present.patterns.has(pattern))
       .sort();
 
     if (!patterns.length) continue;
