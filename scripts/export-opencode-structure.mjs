@@ -14,8 +14,11 @@ const PRUNED_DIRS = new Map([
   ['.mypy_cache', 'type-check cache'],
   ['.ruff_cache', 'lint cache'],
   ['.cache', 'cache directory'],
+  ['local_cache', 'local model/data cache'],
+  ['local-cache', 'local model/data cache'],
   ['.venv', 'virtual environment'],
   ['venv', 'virtual environment'],
+  ['chrome-profile', 'browser runtime profile'],
   ['Cache', 'application/browser cache'],
   ['Code Cache', 'application/browser cache'],
   ['GPUCache', 'application/browser cache'],
@@ -26,6 +29,9 @@ const PRUNED_DIRS = new Map([
   ['Crashpad', 'crash/runtime state'],
   ['BrowserMetrics', 'browser runtime state'],
   ['blob_storage', 'browser runtime state'],
+  ['backup', 'backup directory'],
+  ['backups', 'backup directory'],
+  ['skill-bak', 'skill backup directory'],
 ]);
 
 const SENSITIVE_BASENAME_PATTERNS = [
@@ -70,7 +76,15 @@ function inside(root, candidate) {
 }
 
 function isSensitiveCandidate(name) {
+  if (/^\.env\.(?:example|sample)$/i.test(name)) return false;
   return SENSITIVE_BASENAME_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+function pruneReasonForDirectory(name) {
+  const exact = PRUNED_DIRS.get(name);
+  if (exact) return exact;
+  if (/\.local-bak-/i.test(name)) return 'local backup directory';
+  return undefined;
 }
 
 function parseArgs(argv) {
@@ -149,7 +163,7 @@ async function main() {
       }
 
       if (stat.isDirectory()) {
-        const pruneReason = PRUNED_DIRS.get(child.name);
+        const pruneReason = pruneReasonForDirectory(child.name);
         const entry = {
           path: rel,
           type: 'directory',
@@ -191,7 +205,7 @@ async function main() {
     notes: [
       'File contents are not included.',
       'Symlinks are recorded but never followed.',
-      'Known high-noise cache/dependency/VCS directories are recorded as pruned directory entries without listing their children.',
+      'Known high-noise cache/dependency/VCS/browser-profile/backup directories are recorded as pruned directory entries without listing their children.',
       'Sensitive candidates are based on filenames only; this is not a secret scanner.',
     ],
     summary: {
