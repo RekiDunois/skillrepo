@@ -149,3 +149,25 @@ export async function execRegisteredResource(options: {
     });
   });
 }
+
+export async function installedSkillrepoSupportsExec(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  return await new Promise<boolean>(resolvePromise => {
+    let stderr = '';
+    let settled = false;
+    const finish = (value: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(value);
+    };
+    const child = spawn('skillrepo', ['exec'], {
+      shell: false,
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    child.stderr.on('data', data => stderr += data);
+    child.once('error', () => finish(false));
+    child.once('close', () => finish(stderr.includes('skillrepo exec <repo-id> <repo-relative-resource>')));
+  });
+}
