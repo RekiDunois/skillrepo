@@ -8,11 +8,17 @@ export type PortabilityKind =
   | 'TEST'
   | 'RUNTIME-CODE';
 
+export type PortabilitySegment = {
+  kind: PortabilityKind;
+  lines: number[];
+};
+
 export type PortabilityItem = {
   repoId: string;
   path: string;
   kind: PortabilityKind;
   lines: number[];
+  segments: PortabilitySegment[];
 };
 
 export type MigrationPortabilityResult = {
@@ -48,17 +54,32 @@ function frontmatterEnd(lines: string[]): number {
   return -1;
 }
 
-function classify(path: string, lines: string[], hitIndexes: number[]): PortabilityKind {
-  if (isTestPath(path)) return 'TEST';
+function classifySegments(path: string, lines: string[], hitIndexes: number[]): PortabilitySegment[] {
+  if (isTestPath(path)) {
+    return [{ kind: 'TEST', lines: hitIndexes.map(index => index + 1) }];
+  }
 
   const ext = extname(path).toLowerCase();
   if (ext === '.md' || ext === '.mdx') {
     const end = frontmatterEnd(lines);
-    if (end >= 0 && hitIndexes.some(index => index <= end)) return 'FRONTMATTER-RUNTIME';
-    return 'MARKDOWN-BODY';
+    const frontmatter = end >= 0 ? hitIndexes.filter(index => index <= end) : [];
+    const body = hitIndexes.filter(index => end < 0 || index > end);
+    const segments: PortabilitySegment[] = [];
+    if (frontmatter.length) {
+      segments.push({ kind: 'FRONTMATTER-RUNTIME', lines: frontmatter.map(index => index + 1) });
+    }
+    if (body.length) {
+      segments.push({ kind: 'MARKDOWN-BODY', lines: body.map(index => index + 1) });
+    }
+    return segments;
   }
 
-  return 'RUNTIME-CODE';
+  return [{ kind: 'RUNTIME-CODE', lines: hitIndexes.map(index => index + 1) }];
+}
+
+function conservativeKind(segments: PortabilitySegment[]): PortabilityKind {
+  if (segments.some(segment => segment.kind === 'FRONTMATTER-RUNTIME')) return 'FRONTMATTER-RUNTIME';
+  return segments[0]!.kind;
 }
 
 export async function classifyMigrationPortability(options: {
@@ -82,11 +103,13 @@ export async function classifyMigrationPortability(options: {
         throw new Error(`Portability finding no longer matches file contents: ${file}`);
       }
 
+      const segments = classifySegments(finding.path, lines, hitIndexes);
       items.push({
         repoId: repo.repoId,
         path: finding.path,
-        kind: classify(finding.path, lines, hitIndexes),
+        kind: conservativeKind(segments),
         lines: hitIndexes.map(index => index + 1),
+        segments,
       });
     }
   }
@@ -117,7 +140,14 @@ export function renderMigrationPortability(result: MigrationPortabilityResult): 
       currentRepo = item.repoId;
       lines.push(`${currentRepo}:`);
     }
-    lines.push(`  [${item.kind}] ${item.path}:${item.lines.join(',')}`);
+    if (item.segments.length === 1) {
+      lines.push(`  [${item.segments[0]!.kind}] ${item.path}:${item.segments[0]!.lines.join(',')}`);
+      continue;
+    }
+    lines.push(`  [MIXED] ${item.path}`);
+    for (const segment of item.segments) {
+      lines.push(`    [${segment.kind}] ${segment.lines.join(',')}`);
+    }
   }
 
   lines.push(
