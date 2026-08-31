@@ -77,6 +77,22 @@ test('commit readiness does not trust an ignore rule when .gitignore contains ne
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('migration ignore preserves log negation semantics', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-log-negation-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'log-repo'); const plan = join(root, 'migration-plan.json'); const gitignore = join(repo, '.gitignore'); const original = '*.log\n!important.log\n';
+  try {
+    await mkdir(repo, { recursive: true }); await writePlan(plan, 'log-repo', '/unused'); await writeFile(join(repo, 'debug.log'), 'generated\n', 'utf8'); await writeFile(gitignore, original, 'utf8');
+    const result = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }); assert.equal(result.patterns, 0); assert.equal(result.repositories.length, 0); assert.equal(await readFile(gitignore, 'utf8'), original);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('migration ignore preserves virtualenv negation semantics', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-review-venv-negation-')); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, 'venv-repo'); const plan = join(root, 'migration-plan.json'); const gitignore = join(repo, '.gitignore'); const original = '.venv/\n!.venv/\n';
+  try {
+    await mkdir(join(repo, '.venv'), { recursive: true }); await writePlan(plan, 'venv-repo', '/unused'); await writeFile(gitignore, original, 'utf8');
+    const result = await applyMigrationIgnores({ planPath: plan, targetRoot, dryRun: false }); assert.equal(result.patterns, 0); assert.equal(result.repositories.length, 0); assert.equal(await readFile(gitignore, 'utf8'), original);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('root .git file and symlink are recognized as existing Git metadata', async () => {
   for (const kind of ['file', 'symlink'] as const) {
     const root = await mkdtemp(join(tmpdir(), `skillrepo-review-root-git-${kind}-`)); const targetRoot = join(root, 'repos'); const repo = join(targetRoot, `${kind}-repo`); const plan = join(root, 'migration-plan.json');
