@@ -1,4 +1,4 @@
-import { access, lstat, readFile, readlink, stat } from 'node:fs/promises';
+import { access, lstat, readFile, readlink, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -114,14 +114,23 @@ export async function resolveRegisteredResource(
   const target = resolve(repo, resource);
   if (!within(repo, target)) throw new Error(`Resource path escapes registered repo: ${resourceInput}`);
 
+  let realRepo: string;
+  let realTarget: string;
+  try {
+    [realRepo, realTarget] = await Promise.all([realpath(repo), realpath(target)]);
+  } catch {
+    throw new Error(`Registered repo resource does not exist: ${repoId}/${resource}`);
+  }
+  if (!within(realRepo, realTarget)) throw new Error(`Resource path escapes registered repo: ${resourceInput}`);
+
   let targetStat;
   try {
-    targetStat = await stat(target);
+    targetStat = await stat(realTarget);
   } catch {
     throw new Error(`Registered repo resource does not exist: ${repoId}/${resource}`);
   }
   if (!targetStat.isFile()) throw new Error(`Registered repo resource is not a file: ${repoId}/${resource}`);
-  return target;
+  return realTarget;
 }
 
 export async function execRegisteredResource(options: {
