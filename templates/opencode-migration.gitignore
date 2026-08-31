@@ -22,6 +22,10 @@
 **/.venv/
 **/venv/
 
+# Runtime browser profiles are local state and may contain cookies, history,
+# saved login data, extension state, and other account/session material.
+**/chrome-profile/
+
 # Common application/browser caches and crash/runtime state.
 **/Cache/
 **/Code Cache/
