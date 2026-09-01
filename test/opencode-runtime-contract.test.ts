@@ -7,6 +7,14 @@ const runtimeScript = fs.readFileSync(
   path.join(process.cwd(), "scripts", "opencode-runtime-test.mjs"),
   "utf8",
 );
+const migrationRuntimeScript = fs.readFileSync(
+  path.join(process.cwd(), "scripts", "opencode-runtime-verify.mjs"),
+  "utf8",
+);
+const runtimeModule = fs.readFileSync(
+  path.join(process.cwd(), "src", "runtime.ts"),
+  "utf8",
+);
 
 function functionBody(name: string, nextName: string): string {
   const start = runtimeScript.search(new RegExp(`(?:async\\s+)?function\\s+${name}\\b`));
@@ -37,4 +45,52 @@ test("OpenCode runtime parity probe must load the registered skill inside the mo
     /EXPECTED_RAW_SKILL_CONTENT_MARKER/,
     "the runtime session must verify that the completed skill-tool result contains the fixture's unique content marker",
   );
+});
+
+test("runtime verification uses serve instead of opening the default browser", () => {
+  assert.match(runtimeScript, /\[context\.executable, 'serve',/);
+  assert.doesNotMatch(runtimeScript, /\[context\.executable, 'web',/);
+  assert.match(migrationRuntimeScript, /\[executable, 'serve',/);
+  assert.doesNotMatch(migrationRuntimeScript, /\[executable, 'web',/);
+});
+
+test("migration runtime verification preserves the user global plugin directory", () => {
+  assert.match(
+    migrationRuntimeScript,
+    /symlink\(originalPlugins,\s*join\(configDir, ['"]plugins['"]\)/,
+  );
+});
+
+test("migration runtime verification preserves custom OPENCODE_CONFIG file semantics", () => {
+  const start = migrationRuntimeScript.indexOf("async function verify(context)");
+  const end = migrationRuntimeScript.indexOf("async function main()");
+  assert.ok(start >= 0 && end > start);
+  const body = migrationRuntimeScript.slice(start, end);
+
+  assert.match(body, /env\.OPENCODE_CONFIG\s*=\s*injected\.path/);
+});
+
+test("migration runtime verification keeps config files and resource directories separate", () => {
+  assert.doesNotMatch(
+    migrationRuntimeScript,
+    /join\(dirname\(originalPath\), ['"]plugins['"]\)/,
+  );
+  assert.doesNotMatch(
+    migrationRuntimeScript,
+    /join\(dirname\(originalPath\), ['"]agents['"]\)/,
+  );
+  assert.match(
+    migrationRuntimeScript,
+    /join\(originalResourceDir, ['"]plugins['"]\)/,
+  );
+  assert.match(migrationRuntimeScript, /OPENCODE_CONFIG_DIR/);
+});
+
+test("runtime verification resolves OpenCode env paths before switching helper cwd", () => {
+  const start = runtimeModule.indexOf("export async function verifyOpenCodeRuntime");
+  assert.ok(start >= 0);
+  const body = runtimeModule.slice(start);
+
+  assert.match(body, /OPENCODE_CONFIG\s*:\s*context\.configPath/);
+  assert.match(body, /OPENCODE_CONFIG_DIR\s*:\s*opencodeConfigDir\(env\)/);
 });

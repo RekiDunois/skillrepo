@@ -480,7 +480,16 @@ exit 0
 
     await withConfigDir(f.sourceRoot, async () => {
       process.env.PATH = `${binDir}${delimiter}${oldPath ?? ''}`;
-      const result = await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot });
+      const result = await applyMigration({
+        planPath: f.planPath,
+        targetRoot: f.targetRoot,
+        runtimeVerifier: async context => ({
+          ok: true,
+          phase: context.phase,
+          checks: [{ ok: true, command: `runtime ${context.phase}`, stdout: 'ok', stderr: '' }],
+          diagnostics: {},
+        }),
+      });
       assert.equal(result.status, 'committed');
       assert.equal(result.verification.every(item => item.ok), true);
       assert.ok(result.verification.some(item => item.command === 'skillrepo migration targets'));
