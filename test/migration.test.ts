@@ -461,7 +461,19 @@ test('migration verifies the complete expected discovery set after registration'
     const opencode = join(binDir, 'opencode');
     await writeFile(
       opencode,
-      '#!/usr/bin/env sh\nif [ "$1" = "debug" ] && [ "$2" = "skill" ] && [ -f "$OPENCODE_CONFIG_DIR/opencode.jsonc" ]; then\n  printf "alpha\\n"\nfi\nif [ "$1" = "agent" ] && [ -L "$OPENCODE_CONFIG_DIR/agents/demo-repo" ]; then\n  printf "worker\\n"\nfi\nexit 0\n',
+      `#!/usr/bin/env sh
+if [ "$1" = "debug" ] && [ "$2" = "skill" ]; then
+  if [ -f "$OPENCODE_CONFIG_DIR/opencode.jsonc" ] || [ -f "$OPENCODE_CONFIG_DIR/opencode.json" ]; then
+    printf '%s' '[{"name":"alpha"}]'
+  else
+    printf '%s' '[]'
+  fi
+fi
+if [ "$1" = "agent" ] && [ -L "$OPENCODE_CONFIG_DIR/agents/demo-repo" ]; then
+  printf "worker\\n"
+fi
+exit 0
+`,
       'utf8',
     );
     await chmod(opencode, 0o755);

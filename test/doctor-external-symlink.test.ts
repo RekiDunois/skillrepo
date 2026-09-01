@@ -4,7 +4,7 @@ import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { doctor } from '../src/core.js';
+import { assertNoRuntimeCollisions, doctor, inspectRepo } from '../src/core.js';
 
 async function withDoctorEnv<T>(configDir: string, binDir: string, fn: () => Promise<T>): Promise<T> {
   const oldDir = process.env.OPENCODE_CONFIG_DIR;
@@ -41,14 +41,14 @@ async function makeSkillDiscoveryFixture(output: string): Promise<{
   await mkdir(binDir, { recursive: true });
   await writeFile(join(skillsDir, 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: alpha\n---\n', 'utf8');
   await writeFile(join(skillsDir, 'beta', 'SKILL.md'), '---\nname: beta\ndescription: beta\n---\n', 'utf8');
-  await writeFile(join(configDir, 'opencode.jsonc'), `${JSON.stringify({ skills: [skillsDir] })}\n`, 'utf8');
+  await writeFile(join(configDir, 'opencode.jsonc'), `${JSON.stringify({ skills: { paths: [skillsDir] } })}\n`, 'utf8');
 
   const opencode = join(binDir, 'opencode');
   await writeFile(
     opencode,
     `#!/usr/bin/env sh
 if [ "$1" = "debug" ] && [ "$2" = "skill" ]; then
-  printf '%s\\n' ${output}
+  printf '%s\\n' ${JSON.stringify(output)}
 fi
 exit 0
 `,
@@ -94,19 +94,8 @@ test('doctor accepts pre-existing external agent directories and runtime file sy
   }
 });
 
-test('doctor verifies every skill in configured sources is discoverable', async () => {
-  const fixture = await makeSkillDiscoveryFixture('alpha beta');
-  try {
-    const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
-    assert.equal(result.ok, true);
-    assert.deepEqual(result.issues, []);
-  } finally {
-    await rm(fixture.root, { recursive: true, force: true });
-  }
-});
-
 test('doctor reports configured skills missing from OpenCode discovery', async () => {
-  const fixture = await makeSkillDiscoveryFixture('alpha');
+  const fixture = await makeSkillDiscoveryFixture(JSON.stringify([{ name: 'alpha' }]));
   try {
     const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
     assert.equal(result.ok, false);
@@ -132,5 +121,46 @@ test('doctor does not report success when OpenCode has no registered target sour
     assert.ok(result.issues.some(issue => issue.includes('No registered skill or agent target source')));
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('doctor accepts configured skills present in OpenCode discovery', async () => {
+  const fixture = await makeSkillDiscoveryFixture(JSON.stringify([{ name: 'alpha' }, { name: 'beta' }]));
+  try {
+    const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.issues, []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('doctor does not count a skill ID mentioned in another discovery entry as discovered', async () => {
+  const fixture = await makeSkillDiscoveryFixture(JSON.stringify([{ name: 'alpha', description: 'mentions beta' }]));
+  try {
+    const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
+    assert.equal(result.ok, false);
+    assert.ok(result.issues.some(issue => issue.includes('missing configured skill IDs: beta')));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('collision pre-check fails closed when skill discovery JSON is truncated', async () => {
+  const fixture = await makeSkillDiscoveryFixture('[{"name":"beta"},');
+  const candidate = join(fixture.root, 'candidate');
+  try {
+    await mkdir(join(candidate, 'skills', 'beta'), { recursive: true });
+    await writeFile(
+      join(candidate, 'skills', 'beta', 'SKILL.md'),
+      '---\nname: beta\ndescription: candidate beta\n---\n',
+      'utf8',
+    );
+    const inventory = await inspectRepo(candidate);
+    await withDoctorEnv(fixture.configDir, fixture.binDir, async () => {
+      await assert.rejects(() => assertNoRuntimeCollisions(inventory));
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
