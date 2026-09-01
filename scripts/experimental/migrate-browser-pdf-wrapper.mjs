@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { chmod, copyFile, lstat, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, readFile, readlink, rename, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const START_MARKER = '# BEGIN skillrepo browser-pdf profile resolver';
 const END_MARKER = '# END skillrepo browser-pdf profile resolver';
+const MAX_SYMLINK_DEPTH = 40;
 
 function usage() {
   console.log(`Usage:
@@ -16,8 +17,9 @@ Defaults:
 
 Behavior:
   - dry-run by default
-  - refuses symlink/non-file wrappers
-  - creates a timestamped sibling backup before writing
+  - follows wrapper symlinks without replacing the symlink itself
+  - refuses broken/looping symlinks and non-file final targets
+  - creates a timestamped sibling backup of the real wrapper target before writing
   - injects a CHROME_PROFILE_DIR resolver with this priority:
       1. explicit CHROME_PROFILE_DIR
       2. external skillrepo data profile, if present
@@ -49,6 +51,37 @@ function expandHome(path) {
   if (path === '~') return homedir();
   if (path.startsWith('~/')) return join(homedir(), path.slice(2));
   return path;
+}
+
+async function resolveWrapperTarget(wrapperPath) {
+  const chain = [];
+  const seen = new Set();
+  let current = wrapperPath;
+
+  for (let depth = 0; depth <= MAX_SYMLINK_DEPTH; depth += 1) {
+    if (seen.has(current)) throw new Error(`Wrapper symlink loop detected at: ${current}`);
+    seen.add(current);
+
+    const stat = await lstat(current).catch(error => {
+      throw new Error(`Cannot read wrapper path ${current}: ${error.message}`);
+    });
+
+    if (!stat.isSymbolicLink()) {
+      if (!stat.isFile()) throw new Error(`Wrapper target is not a regular file: ${current}`);
+      return { targetPath: current, targetStat: stat, chain };
+    }
+
+    if (depth === MAX_SYMLINK_DEPTH) {
+      throw new Error(`Wrapper symlink chain exceeds ${MAX_SYMLINK_DEPTH} links`);
+    }
+
+    const rawTarget = await readlink(current);
+    const target = resolve(dirname(current), rawTarget);
+    chain.push({ path: current, rawTarget, target });
+    current = target;
+  }
+
+  throw new Error('Wrapper symlink resolution failed');
 }
 
 function resolverBlock() {
@@ -92,11 +125,13 @@ function findInsertionOffset(text) {
   return 0;
 }
 
-function rewriteLegacyReferences(text, wrapperPath) {
-  const wrapperDir = dirname(wrapperPath);
+function rewriteLegacyReferences(text, logicalWrapperPath, targetWrapperPath) {
+  const logicalWrapperDir = dirname(logicalWrapperPath);
+  const targetWrapperDir = dirname(targetWrapperPath);
   const home = homedir();
   const candidates = [
-    `${wrapperDir}/chrome-profile`,
+    `${logicalWrapperDir}/chrome-profile`,
+    `${targetWrapperDir}/chrome-profile`,
     `${home}/.config/opencode/skill/chrome-devtools/chrome-profile`,
     '~/.config/opencode/skill/chrome-devtools/chrome-profile',
     '${HOME}/.config/opencode/skill/chrome-devtools/chrome-profile',
@@ -106,7 +141,7 @@ function rewriteLegacyReferences(text, wrapperPath) {
   ];
   let output = text;
   let replacements = 0;
-  for (const candidate of candidates) {
+  for (const candidate of [...new Set(candidates)]) {
     if (!candidate) continue;
     const parts = output.split(candidate);
     if (parts.length > 1) {
@@ -117,12 +152,12 @@ function rewriteLegacyReferences(text, wrapperPath) {
   return { text: output, replacements };
 }
 
-function migratedText(text, wrapperPath) {
+function migratedText(text, logicalWrapperPath, targetWrapperPath) {
   if (text.includes(START_MARKER) || text.includes(END_MARKER)) {
     if (text.includes(START_MARKER) && text.includes(END_MARKER)) return { alreadyMigrated: true, text, replacements: 0 };
     throw new Error('Wrapper contains only one migration marker; refusing to modify a partial migration');
   }
-  const rewritten = rewriteLegacyReferences(text, wrapperPath);
+  const rewritten = rewriteLegacyReferences(text, logicalWrapperPath, targetWrapperPath);
   if (rewritten.replacements === 0) {
     const lines = text.split(/\r?\n/).filter(line => line.includes('chrome-profile'));
     const detail = lines.length ? `\nObserved chrome-profile lines:\n${lines.map(line => `  ${line}`).join('\n')}` : '';
@@ -145,22 +180,26 @@ function backupPath(wrapperPath) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) return usage();
-  const wrapperPath = resolve(expandHome(args.wrapper ?? '~/.config/opencode/skill/chrome-devtools/chrome-mcp-wrapper.sh'));
-  const stat = await lstat(wrapperPath).catch(error => {
-    throw new Error(`Cannot read wrapper ${wrapperPath}: ${error.message}`);
-  });
-  if (stat.isSymbolicLink()) throw new Error(`Refusing to modify symlink wrapper: ${wrapperPath}`);
-  if (!stat.isFile()) throw new Error(`Wrapper is not a regular file: ${wrapperPath}`);
 
-  const original = await readFile(wrapperPath, 'utf8');
-  if (original.includes('\u0000')) throw new Error(`Wrapper appears to be binary: ${wrapperPath}`);
-  const result = migratedText(original, wrapperPath);
+  const logicalWrapperPath = resolve(expandHome(args.wrapper ?? '~/.config/opencode/skill/chrome-devtools/chrome-mcp-wrapper.sh'));
+  const resolved = await resolveWrapperTarget(logicalWrapperPath);
+  const targetWrapperPath = resolved.targetPath;
+  const stat = resolved.targetStat;
+
+  const original = await readFile(targetWrapperPath, 'utf8');
+  if (original.includes('\u0000')) throw new Error(`Wrapper appears to be binary: ${targetWrapperPath}`);
+  const result = migratedText(original, logicalWrapperPath, targetWrapperPath);
   if (result.alreadyMigrated) {
-    console.log(`ALREADY-MIGRATED: ${wrapperPath}`);
+    console.log(`ALREADY-MIGRATED: ${targetWrapperPath}`);
+    if (resolved.chain.length) console.log(`WRAPPER LINK PRESERVED: ${logicalWrapperPath}`);
     return;
   }
 
-  console.log(`WRAPPER: ${wrapperPath}`);
+  console.log(`WRAPPER: ${logicalWrapperPath}`);
+  if (resolved.chain.length) {
+    for (const link of resolved.chain) console.log(`WRAPPER LINK: ${link.path} -> ${link.rawTarget}`);
+    console.log(`WRAPPER TARGET: ${targetWrapperPath}`);
+  }
   console.log(`LEGACY REFERENCES TO REWRITE: ${result.replacements}`);
   console.log(`MODE: ${args.execute ? 'EXECUTE' : 'DRY-RUN'}`);
   console.log('PROFILE DATA: unchanged');
@@ -169,25 +208,27 @@ async function main() {
     return;
   }
 
-  const backup = backupPath(wrapperPath);
-  await copyFile(wrapperPath, backup, constants.COPYFILE_EXCL);
+  const backup = backupPath(targetWrapperPath);
+  await copyFile(targetWrapperPath, backup, constants.COPYFILE_EXCL);
   await chmod(backup, stat.mode & 0o7777);
 
-  const temporary = `${wrapperPath}.skillrepo-tmp-${process.pid}`;
+  const temporary = `${targetWrapperPath}.skillrepo-tmp-${process.pid}`;
   try {
     await writeFile(temporary, result.text, { encoding: 'utf8', mode: stat.mode & 0o7777, flag: 'wx' });
     await chmod(temporary, stat.mode & 0o7777);
     const check = await readFile(temporary, 'utf8');
     if (!check.includes(START_MARKER) || !check.includes(END_MARKER)) throw new Error('Temporary wrapper verification failed');
-    // rename is atomic on the same filesystem.
-    await rename(temporary, wrapperPath);
+    // rename is atomic on the same filesystem. The OpenCode compatibility symlink
+    // remains untouched because only the resolved target path is replaced.
+    await rename(temporary, targetWrapperPath);
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => {});
     throw error;
   }
 
   console.log(`BACKUP: ${backup}`);
-  console.log('UPDATED: wrapper now supports external profile resolution while retaining legacy fallback.');
+  if (resolved.chain.length) console.log(`SYMLINK PRESERVED: ${logicalWrapperPath}`);
+  console.log('UPDATED: wrapper target now supports external profile resolution while retaining legacy fallback.');
   console.log('\nNext test: run the same browser/PDF workflow you normally use.');
   console.log('Expected on this first pass: if the external profile does not exist and the legacy profile does, the legacy profile is still selected.');
 }
