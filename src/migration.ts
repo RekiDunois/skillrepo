@@ -118,6 +118,7 @@ type JournalOperation = MoveOperation & {
   skillShimStagePath?: string;
   generatedAgentBackupPath?: string;
   generatedAgentOriginalFingerprint?: string;
+  generatedAgentOriginalContentFingerprint?: string;
   generatedAgentRewrittenFingerprint?: string;
 };
 
@@ -1113,6 +1114,7 @@ async function ensureStableAgentName(
   }
   const pathStat = await lstat(path);
   operation.generatedAgentOriginalFingerprint = fingerprintBuffer(`file\0${pathStat.mode & 0o7777}\0`, Buffer.from(text, 'utf8'));
+  operation.generatedAgentOriginalContentFingerprint = fingerprintBuffer('agent-original\0', Buffer.from(text, 'utf8'));
   await persistJournal(journal);
 
   const stableName = operation.expectedAgentName ?? basename(path, '.md');
@@ -1120,6 +1122,7 @@ async function ensureStableAgentName(
   operation.generatedAgentRewrittenFingerprint = fingerprintBuffer(`file\0${pathStat.mode & 0o7777}\0`, Buffer.from(updated, 'utf8'));
   await persistJournal(journal);
   await writeFile(path, updated, 'utf8');
+  crashAfter('agent-stable-name-written');
 }
 
 async function subtreeContainsSkill(path: string): Promise<boolean> {
@@ -1232,12 +1235,15 @@ async function prepareOperations(journal: MigrationJournal): Promise<void> {
     if (await lexists(operation.target)) throw new Error(`Migration target already exists: ${operation.target}`);
 
     operation.stagedFingerprint = operation.sourceFingerprint;
+    operation.stagedIdentity = operation.sourceIdentity;
     await persistJournal(journal);
     await rename(operation.source, operation.stagePath);
+    crashAfter(`source-staged-${operation.operationId}`);
     operation.state = 'staged';
+    if (!sameIdentity(await pathIdentity(operation.stagePath), operation.stagedIdentity)) {
+      throw new Error(`Staged migration content identity changed: ${operation.stagePath}`);
+    }
     operation.stagedFingerprint = await fingerprintPath(operation.stagePath);
-    operation.stagedIdentity = await pathIdentity(operation.stagePath) ?? undefined;
-    if (!operation.stagedIdentity) throw new Error(`Staged migration content disappeared: ${operation.stagePath}`);
     await persistJournal(journal);
 
     if (operation.kind === 'agent' && operation.target.endsWith('.md')) {
@@ -1668,6 +1674,27 @@ async function removeAgentRegistrationLinks(journal: MigrationJournal): Promise<
 
 async function restoreMovedOperation(operation: JournalOperation, journal: MigrationJournal): Promise<string[]> {
   const issues: string[] = [];
+  const sourceIsOriginal = await fingerprintPath(operation.source) === operation.sourceFingerprint
+    && sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity);
+  let generatedAgentOriginal: string | undefined;
+  if (operation.generatedAgentBackupPath && !sourceIsOriginal) {
+    const backupStat = await tryLstat(operation.generatedAgentBackupPath);
+    if (!backupStat?.isFile() || backupStat.isSymbolicLink()) {
+      return [`Generated agent backup is not a regular file: ${operation.generatedAgentBackupPath}`];
+    }
+    if (!operation.generatedAgentOriginalContentFingerprint) {
+      return [`Generated agent backup ownership proof is missing: ${operation.generatedAgentBackupPath}`];
+    }
+    try {
+      generatedAgentOriginal = await readFile(operation.generatedAgentBackupPath, 'utf8');
+    } catch (error) {
+      return [`Cannot read generated agent backup ${operation.generatedAgentBackupPath}: ${error instanceof Error ? error.message : String(error)}`];
+    }
+    if (fingerprintBuffer('agent-original\0', Buffer.from(generatedAgentOriginal, 'utf8'))
+      !== operation.generatedAgentOriginalContentFingerprint) {
+      return [`Generated agent backup was modified outside transaction: ${operation.generatedAgentBackupPath}`];
+    }
+  }
   const targetExists = await lexists(operation.target);
   if (targetExists) {
     if (!operation.targetFingerprint) return [`Transaction operation has no target fingerprint: ${operation.operationId}`];
@@ -1701,6 +1728,9 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
     }
   } else if (stageExists) {
     if (!(await stagedContentIsOwned(operation))) return [`Staging content was modified outside transaction: ${operation.stagePath}`];
+    if (operation.stagedIdentity && !sameIdentity(await pathIdentity(operation.stagePath), operation.stagedIdentity)) {
+      return [`Staging content was recreated outside transaction: ${operation.stagePath}`];
+    }
     if (await lexists(operation.source)) {
       const sourceFingerprint = await fingerprintPath(operation.source);
       if (sourceFingerprint !== operation.sourceFingerprint
@@ -1719,11 +1749,15 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
   if (operation.generatedAgentBackupPath) {
     const current = await fingerprintPath(operation.source);
     if (current === operation.sourceFingerprint) return issues;
-    if (current !== operation.targetFingerprint && current !== operation.stagedFingerprint) {
+    if (current !== operation.targetFingerprint
+      && current !== operation.stagedFingerprint
+      && current !== operation.generatedAgentRewrittenFingerprint) {
       return [`Agent source changed during rollback: ${operation.source}`];
     }
-    const original = await readFile(operation.generatedAgentBackupPath, 'utf8');
-    await writeFile(operation.source, original, 'utf8');
+    if (generatedAgentOriginal === undefined) {
+      return [`Generated agent backup was not validated before source restore: ${operation.generatedAgentBackupPath}`];
+    }
+    await writeFile(operation.source, generatedAgentOriginal, 'utf8');
   }
 
   await assertCurrentFingerprint(operation.source, operation.sourceFingerprint, 'Restored migration source');

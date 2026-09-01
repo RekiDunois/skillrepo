@@ -220,3 +220,77 @@ test('migration never follows a pre-existing agent backup symlink', async () => 
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+test('rollback recovers after stable agent rewrite is killed', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'agent-stable-name-written');
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-complete/,
+      );
+    });
+    assert.equal(
+      await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
+      '---\ndescription: test\nmode: subagent\n---\nworker\n',
+    );
+    await assert.rejects(access(join(f.targetRoot, 'demo-repo')));
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('resume never adopts a same-content recreated stage', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'source-staged-op-0003');
+    const names = await readdir(join(f.sourceRoot, '.skillrepo-migrations'));
+    const journalPath = join(f.sourceRoot, '.skillrepo-migrations', names.find(name => name.endsWith('.json'))!);
+    const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
+      operations: Array<{ operationId: string; source: string; stagePath: string }>;
+    };
+    const operation = journal.operations.find(item => item.operationId === 'op-0003')!;
+    const text = await readFile(operation.stagePath, 'utf8');
+    await rm(operation.stagePath, { force: true });
+    await writeFile(operation.stagePath, text, 'utf8');
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-incomplete/,
+      );
+    });
+    await access(operation.stagePath);
+    await assert.rejects(access(operation.source));
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('rollback never restores a modified generated-agent backup', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'config-written');
+    const names = await readdir(join(f.sourceRoot, '.skillrepo-migrations'));
+    const journalPath = join(f.sourceRoot, '.skillrepo-migrations', names.find(name => name.endsWith('.json'))!);
+    const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
+      operations: Array<{ source: string; generatedAgentBackupPath?: string }>;
+    };
+    const operation = journal.operations.find(item => item.source.endsWith(join('agents', 'worker.md')))!;
+    assert.ok(operation.generatedAgentBackupPath);
+    await writeFile(operation.generatedAgentBackupPath!, 'external backup edit\n', 'utf8');
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-incomplete/,
+      );
+    });
+    const sourceText = await readFile(operation.source, 'utf8').catch(() => undefined);
+    assert.notEqual(sourceText, 'external backup edit\n');
+    assert.equal(await readFile(operation.generatedAgentBackupPath!, 'utf8'), 'external backup edit\n');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
