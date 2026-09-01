@@ -22,9 +22,10 @@ import { applyMigrationPortabilityFixes, renderMigrationPortabilityFix } from '.
 import { auditMigrationCommitReadiness } from './readiness.js';
 import { execRegisteredResource, installedSkillrepoSupportsExec } from './runtime.js';
 import { renderSkillModificationHandoff } from './skill_modification_template.js';
+import { initRepo } from './init.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify] [--template-out <file>]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
+  console.error(`Usage:\n  skillrepo init <dir>\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify] [--template-out <file>]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
   process.exit(2);
 }
 
@@ -45,6 +46,13 @@ function printVerification(results: VerifyResult[]): boolean {
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   if (!command) usage();
+
+  if (command === 'init') {
+    if (rest.length !== 1 || rest[0]!.startsWith('-')) usage();
+    const repo = await initRepo(rest[0]!);
+    console.log(`Initialized ${repo}`);
+    return;
+  }
 
   if (command === 'exec') {
     if (rest.length < 2) usage();
