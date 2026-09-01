@@ -16,7 +16,8 @@ default is the standard package authoring layout:
 skillrepo init /path/to/new-repo
 ```
 
-`init` creates only the package skeleton (`apm.yml`, `.apm/skills/.gitkeep`,
+`init` creates only the package skeleton (`apm.yml` with `name` and
+`version: 0.1.0`, `.apm/skills/.gitkeep`,
 `.apm/agents/.gitkeep`, and `.gitignore`). It does not initialize Git, modify
 OpenCode configuration, create symlinks, register the repository, or require
 OpenCode to discover an empty repository. Add the new skill or agent, then

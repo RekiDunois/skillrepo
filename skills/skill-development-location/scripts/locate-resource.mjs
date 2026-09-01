@@ -330,7 +330,26 @@ function gitState(path) {
   };
 }
 
-function layoutMetadata(sourceRoot, git) {
+function pathWithin(root, candidate) {
+  const relativePath = relative(root, candidate);
+  return relativePath === '' || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
+}
+
+function canonicalSourceRoot(kind, configuredSourceRoot, filePath) {
+  if (pathWithin(configuredSourceRoot, filePath)) return configuredSourceRoot;
+
+  const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
+  let directory = dirname(filePath);
+  while (true) {
+    if (basename(directory) === sourceDirectory) return directory;
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return configuredSourceRoot;
+}
+
+function layoutMetadata(kind, sourceRoot, git) {
   const realSourceRoot = resolve(sourceRoot);
   const parent = dirname(realSourceRoot);
   const packageRoot = dirname(parent);
@@ -343,13 +362,14 @@ function layoutMetadata(sourceRoot, git) {
     // A source root can be a regular OpenCode directory without a package manifest.
   }
 
-  if (basename(realSourceRoot) === 'skills' && basename(parent) === '.apm' && hasPackageManifest) {
+  const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
+  if (basename(realSourceRoot) === sourceDirectory && basename(parent) === '.apm' && hasPackageManifest) {
     return {
       repoRoot: git.gitRoot ?? packageRoot,
       layout: 'apm',
     };
   }
-  if (basename(realSourceRoot) === 'skills') {
+  if (basename(realSourceRoot) === sourceDirectory) {
     return {
       repoRoot: git.gitRoot ?? parent,
       layout: 'skillrepo',
@@ -383,7 +403,8 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
       const metadataName = await frontmatterName(file.path);
       const identifiers = resourceIds(kind, root.path, file.logicalPath, metadataName);
       if (!identifiers.includes(name)) continue;
-      const sourceRoot = await realpath(root.path);
+      const configuredSourceRoot = await realpath(root.path);
+      const sourceRoot = canonicalSourceRoot(kind, configuredSourceRoot, file.path);
       const sourceRelativePath = relative(sourceRoot, file.path).split(sep).join('/');
       const candidate = {
         path: file.path,
@@ -395,7 +416,7 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
         frontmatterName: metadataName,
         git: gitState(file.path),
       };
-      const layout = layoutMetadata(candidate.sourceRoot, candidate.git);
+      const layout = layoutMetadata(kind, candidate.sourceRoot, candidate.git);
       candidate.repoRoot = layout.repoRoot;
       candidate.layout = layout.layout;
       if (identifiers[0] === name) primaryCandidates.push(candidate);

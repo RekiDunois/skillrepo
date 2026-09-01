@@ -83,6 +83,9 @@ repo/
         └── .gitkeep
 ```
 
+The generated `apm.yml` contains the minimal current contract fields `name` and
+`version: 0.1.0`; full schema validation is tracked separately in #34.
+
 Use `skillrepo init --layout legacy <dir>` only when the legacy `skills/` and
 `agents/` layout is explicitly required. After adding real skills or agents,
 run `skillrepo register <repo>` explicitly. `init` does not itself make an

@@ -31,7 +31,7 @@ export async function initRepo(inputPath: string, cwd = process.cwd(), layout: I
   if (layout === 'apm') {
     const name = basename(target);
     const manifestName = /^[A-Za-z0-9._-]+$/.test(name) ? name : JSON.stringify(name);
-    await writeFile(resolve(target, 'apm.yml'), `name: ${manifestName}\n`, { encoding: 'utf8', flag: 'wx' });
+    await writeFile(resolve(target, 'apm.yml'), `name: ${manifestName}\nversion: 0.1.0\n`, { encoding: 'utf8', flag: 'wx' });
   }
   await writeFile(resolve(sourceRoot, 'skills', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
   await writeFile(resolve(sourceRoot, 'agents', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });

@@ -81,7 +81,7 @@ test('init defaults to the package authoring layout', async () => {
     assert.deepEqual((await readdir(join(repo, '.apm'))).sort(), ['agents', 'skills'].sort());
     assert.equal(await readFile(join(repo, '.apm', 'skills', '.gitkeep'), 'utf8'), '');
     assert.equal(await readFile(join(repo, '.apm', 'agents', '.gitkeep'), 'utf8'), '');
-    assert.match(await readFile(join(repo, 'apm.yml'), 'utf8'), /^name: package-repo\n$/);
+    assert.match(await readFile(join(repo, 'apm.yml'), 'utf8'), /^name: package-repo\nversion: 0\.1\.0\n$/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

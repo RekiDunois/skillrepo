@@ -54,7 +54,8 @@ the package layout by default:
 skillrepo init <repo>
 ```
 
-`skillrepo init` creates `apm.yml` and `.apm/skills` by default. Use
+`skillrepo init` creates `apm.yml` with the current minimum `name` and
+`version: 0.1.0` fields, plus `.apm/skills`, by default. Use
 `skillrepo init --layout legacy <repo>` only when the user explicitly requests
 the legacy layout. `init` does not initialize Git or register the repository.
 
