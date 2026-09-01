@@ -427,15 +427,15 @@ export function runOpenCode(args: string[], env = process.env): Promise<VerifyRe
   return run;
 }
 
-function discoveredSkillIds(output: string): Set<string> {
+function parseDiscoveredSkillIds(output: string): Set<string> | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
   } catch {
-    return new Set();
+    return undefined;
   }
 
-  if (!Array.isArray(parsed)) return new Set();
+  if (!Array.isArray(parsed)) return undefined;
 
   const ids = new Set<string>();
   for (const entry of parsed) {
@@ -458,7 +458,14 @@ function expectIdentifiers(
   kind: 'skill' | 'agent',
 ): VerifyResult {
   if (!result.ok) return result;
-  const discovered = kind === 'skill' ? discoveredSkillIds(result.stdout) : undefined;
+  const discovered = kind === 'skill' ? parseDiscoveredSkillIds(result.stdout) : undefined;
+  if (kind === 'skill' && !discovered) {
+    return {
+      ...result,
+      ok: false,
+      stderr: `${result.stderr}${result.stderr ? '\n' : ''}OpenCode skill discovery output is not valid JSON`,
+    };
+  }
   const wrong = ids.filter(id => (discovered ? discovered.has(id) : containsIdentifier(result.stdout, id)) !== shouldExist);
   if (!wrong.length) return result;
 
@@ -502,7 +509,8 @@ export async function assertNoRuntimeCollisions(inventory: RepoInventory): Promi
 
   const collisions: string[] = [];
   if (skillProbe) {
-    const discovered = discoveredSkillIds(skillProbe.stdout);
+    const discovered = parseDiscoveredSkillIds(skillProbe.stdout);
+    if (!discovered) throw new Error('OpenCode skill discovery output is not valid JSON');
     for (const id of skillIds) {
       if (discovered.has(id)) collisions.push(`Skill ID '${id}' is already visible in OpenCode`);
     }
@@ -630,10 +638,13 @@ export async function doctor(): Promise<{ ok: boolean; issues: string[]; verific
   }
 
   const skillProbe = verification.find(result => result.command === 'opencode debug skill');
-  if (skillProbe?.ok) {
-    const discovered = discoveredSkillIds(skillProbe.stdout);
-    const missing = staticChecks.skillIds.filter(id => !discovered.has(id));
-    if (missing.length) issues.push(`OpenCode discovery missing configured skill IDs: ${missing.join(', ')}`);
+  if (skillProbe?.ok && staticChecks.skillIds.length) {
+    const discovered = parseDiscoveredSkillIds(skillProbe.stdout);
+    if (!discovered) issues.push('OpenCode skill discovery output is not valid JSON');
+    else {
+      const missing = staticChecks.skillIds.filter(id => !discovered.has(id));
+      if (missing.length) issues.push(`OpenCode discovery missing configured skill IDs: ${missing.join(', ')}`);
+    }
   }
   return { ok: issues.length === 0, issues, verification };
 }
