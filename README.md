@@ -2,9 +2,51 @@
 
 `skillrepo` registers ordinary skill/agent repositories with OpenCode so they can stay outside OpenCode's default config directories while remaining directly discoverable from their working trees.
 
+## Install and use
+
+This repository is not published to npm. Install it from a checkout. Node.js 22+ is required; Git is also required for the migration commit-readiness commands.
+
+For a normal local installation:
+
+```bash
+git clone https://github.com/RekiDunois/skillrepo.git
+cd skillrepo
+npm install
+npm run build
+npm install -g .
+```
+
+Register the checkout with OpenCode. This adds its `skills/` directory to OpenCode's skill sources and creates an OpenCode agent link only when the checkout has an `agents/` directory:
+
+```bash
+skillrepo register "$(pwd)"
+skillrepo doctor
+```
+
+After registration, the skills in this repository, including `skill-modification`, are available in OpenCode. Ask OpenCode to use `skill-modification` when changing a skill or agent. The registration is idempotent, so running it again is safe.
+
+When the checkout is updated, rebuild it and run the health check. Re-registration is normally unnecessary because OpenCode keeps the checkout path:
+
+```bash
+git pull
+npm install
+npm run build
+skillrepo doctor
+```
+
+To remove the registration without deleting the checkout:
+
+```bash
+skillrepo unregister "$(pwd)"
+npm uninstall -g skillrepo
+```
+
+The migration commands are for moving an existing OpenCode installation into external repositories; they are not needed for the normal install-and-register flow.
+
 ## v0 scope
 
 ```bash
+skillrepo init <dir>
 skillrepo register <repo>
 skillrepo unregister <repo>
 skillrepo exec <repo-id> <repo-relative-resource> [args...]
@@ -17,7 +59,31 @@ skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path
 skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]
 ```
 
-A registered repo can use either the legacy layout or a standard package authoring layout:
+`init` creates a new skillrepo repository skeleton without initializing Git,
+registering the repository, or changing OpenCode configuration:
+
+```bash
+skillrepo init ./new-repo
+skillrepo init .
+```
+
+The target may be missing or an existing empty directory. Non-empty
+directories, files, and symlink paths are rejected before any write. The
+result is:
+
+```text
+repo/
+├── .gitignore
+├── skills/
+│   └── .gitkeep
+└── agents/
+    └── .gitkeep
+```
+
+After adding real skills or agents, run `skillrepo register <repo>` explicitly.
+`init` does not itself make an empty repository discoverable by OpenCode.
+
+A registered repo follows this convention:
 
 ```text
 repo/
@@ -25,17 +91,7 @@ repo/
 └── agents/
 ```
 
-```text
-repo/
-├── apm.yml
-└── .apm/
-    ├── skills/
-    └── agents/
-```
-
-`register` adds the selected source directory (`repo/skills` or `repo/.apm/skills`) to OpenCode's global `skills` sources. Legacy agents use one repo-level directory symlink under OpenCode's global `agents/` directory and must declare a stable frontmatter `name`. APM agents use canonical `.agent.md` files and get per-file `<name>.md` symlinks under OpenCode's global `agents/` directory; the agent name comes from the source filename. All links point directly at the original source, so `skillrepo` never copies their contents.
-
-Only one supported layout may be present in a repository. If both layouts contain a `skills` or `agents` source directory, inspection fails closed rather than guessing.
+`register` adds the absolute `repo/skills` path to OpenCode's global `skills` sources and creates one repo-level directory symlink under OpenCode's global `agents/` directory. Agent Markdown files must declare a stable frontmatter `name`.
 
 Registration and unregistration are intended to be idempotent. `unregister` only removes linkage owned by the requested repo; it never removes repo contents.
 

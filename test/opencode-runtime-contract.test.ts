@@ -62,6 +62,15 @@ test("OpenCode runtime parity probe must load the registered skill inside the mo
   );
 });
 
+test("OpenCode runtime fixture covers init and explicit registration", () => {
+  const fixture = functionBody("createFixture", "listProbe");
+
+  assert.match(fixture, /\[cli, 'init', repoRoot\]/);
+  assert.match(fixture, /writeFile\(skillPath, skillContent/);
+  assert.match(fixture, /\[cli, 'register', repoRoot\]/);
+  assert.doesNotMatch(fixture, /migration.*apply/);
+});
+
 test("runtime verification uses serve instead of opening the default browser", () => {
   assert.match(runtimeScript, /\[context\.executable, 'serve',/);
   assert.doesNotMatch(runtimeScript, /\[context\.executable, 'web',/);
