@@ -9,10 +9,12 @@ const runtimeScript = fs.readFileSync(
 );
 
 function functionBody(name: string, nextName: string): string {
-  const start = runtimeScript.indexOf(`function ${name}`);
-  const end = runtimeScript.indexOf(`\nfunction ${nextName}`, start);
+  const start = runtimeScript.search(new RegExp(`(?:async\\s+)?function\\s+${name}\\b`));
+  const endOffset = runtimeScript.slice(start).search(new RegExp(`\\n(?:async\\s+)?function\\s+${nextName}\\b`));
+  const end = endOffset < 0 ? -1 : start + endOffset;
   assert.notEqual(start, -1, `missing ${name}`);
   assert.notEqual(end, -1, `missing boundary after ${name}`);
+  assert.ok(end > start, `unexpected function order: ${name} must precede ${nextName}`);
   return runtimeScript.slice(start, end);
 }
 
@@ -23,7 +25,7 @@ test("OpenCode runtime parity probe must load the registered skill inside the mo
   assert.match(
     mockProvider,
     /name:\s*["']skill["']/,
-    "the deterministic model must invoke OpenCode's built-in skill tool before requesting the shell tool",
+    "the deterministic model must invoke OpenCode's built-in skill tool",
   );
   assert.match(
     mockProvider,

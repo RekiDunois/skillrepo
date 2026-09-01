@@ -8,8 +8,8 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
-const PROBE_NAME = 'skillrepo-runtime-probe'
-const PROBE_MARKER = 'SKILLREPO_RUNTIME_PROBE_MARKER_2026'
+const SKILL_NAME = 'skillrepo-runtime-probe'
+const EXPECTED_RAW_SKILL_CONTENT_MARKER = 'SKILLREPO_RUNTIME_PROBE_MARKER_2026'
 const SUCCESS_MARKER = 'SKILL_LOAD_OK'
 const DEFAULT_TIMEOUT_MS = 30_000
 
@@ -147,7 +147,7 @@ async function waitForHealth(baseUrl, processInfo) {
   throw new Error(`timed out waiting for ${baseUrl} (${lastError})`)
 }
 
-async function startMockProvider() {
+async function createMockProvider() {
   const requests = []
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url === '/v1/models') {
@@ -166,7 +166,7 @@ async function startMockProvider() {
     for await (const chunk of request) chunks.push(chunk)
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     const serialized = JSON.stringify(body)
-    const hasProbeMarker = serialized.includes(PROBE_MARKER)
+    const hasProbeMarker = serialized.includes(EXPECTED_RAW_SKILL_CONTENT_MARKER)
     const firstRequest = requests.length === 0
     requests.push({ body, hasProbeMarker, firstRequest })
 
@@ -181,7 +181,7 @@ async function startMockProvider() {
       type: 'function',
       function: {
         name: 'skill',
-        arguments: JSON.stringify({ name: PROBE_NAME }),
+        arguments: JSON.stringify({ name: SKILL_NAME }),
       },
     }
     if (firstRequest) requests[0].toolCall = toolCall
@@ -237,6 +237,26 @@ async function startMockProvider() {
   }
 }
 
+async function writeProjectConfig(root, mockBaseUrl) {
+  const configDir = join(root, 'opencode-config')
+  await writeFile(
+    join(configDir, 'opencode.jsonc'),
+    `${JSON.stringify({
+      $schema: 'https://opencode.ai/config.json',
+      provider: {
+        mock: {
+          npm: '@ai-sdk/openai-compatible',
+          name: 'skillrepo deterministic mock',
+          options: { baseURL: `${mockBaseUrl}/v1`, apiKey: 'skillrepo-test-only' },
+          models: { 'mock-model': { name: 'skillrepo mock model' } },
+        },
+      },
+    }, null, 2)}
+`,
+    'utf8',
+  )
+}
+
 async function removeFixture(root) {
   let lastError
   for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -260,38 +280,24 @@ async function createFixture(root, mockBaseUrl) {
   const planPath = join(root, 'migration-plan.json')
   const repoId = 'skillrepo-runtime-probe-repo'
   const repoRoot = join(targetRoot, repoId)
-  const skillPath = join(repoRoot, 'skills', PROBE_NAME, 'SKILL.md')
+  const skillPath = join(repoRoot, 'skills', SKILL_NAME, 'SKILL.md')
 
-  await mkdir(join(sourceRoot, 'skill', PROBE_NAME), { recursive: true })
+  await mkdir(join(sourceRoot, 'skill', SKILL_NAME), { recursive: true })
   await mkdir(configDir, { recursive: true })
   await mkdir(homeDir, { recursive: true })
   await mkdir(projectDir, { recursive: true })
   await writeFile(
-    join(sourceRoot, 'skill', PROBE_NAME, 'SKILL.md'),
-    `---\nname: ${PROBE_NAME}\ndescription: "Deterministic runtime verification probe"\n---\n\nUnique body marker: ${PROBE_MARKER}\n`,
+    join(sourceRoot, 'skill', SKILL_NAME, 'SKILL.md'),
+    `---\nname: ${SKILL_NAME}\ndescription: "Deterministic runtime verification probe"\n---\n\nUnique body marker: ${EXPECTED_RAW_SKILL_CONTENT_MARKER}\n`,
     'utf8',
   )
-  await writeFile(
-    join(configDir, 'opencode.jsonc'),
-    `${JSON.stringify({
-      $schema: 'https://opencode.ai/config.json',
-      provider: {
-        mock: {
-          npm: '@ai-sdk/openai-compatible',
-          name: 'skillrepo deterministic mock',
-          options: { baseURL: `${mockBaseUrl}/v1`, apiKey: 'skillrepo-test-only' },
-          models: { 'mock-model': { name: 'skillrepo mock model' } },
-        },
-      },
-    }, null, 2)}\n`,
-    'utf8',
-  )
+  await writeProjectConfig(root, mockBaseUrl)
   await writeFile(
     planPath,
     `${JSON.stringify({
       schemaVersion: 1,
       generatedFrom: { sourceRoot },
-      repositories: [{ id: repoId, action: 'CREATE_AND_MOVE', skills: [PROBE_NAME], agents: [], libs: [] }],
+      repositories: [{ id: repoId, action: 'CREATE_AND_MOVE', skills: [SKILL_NAME], agents: [], libs: [] }],
     }, null, 2)}\n`,
     'utf8',
   )
@@ -324,7 +330,7 @@ async function listProbe(baseUrl, projectDir) {
   assert.ok(Array.isArray(skills))
   return {
     count: skills.length,
-    probe: skills.find((skill) => skill.name === PROBE_NAME),
+    probe: skills.find((skill) => skill.name === SKILL_NAME),
   }
 }
 
@@ -345,35 +351,6 @@ function makeDiagnostics(context, details = {}) {
     webOutput: processDiagnostics(context.web),
     ...details,
   }, null, 2)
-}
-
-async function runDiscoveryTest(context) {
-  try {
-    const [tuiSkills, webSkills] = await Promise.all([
-      listProbe(context.tuiBaseUrl, context.fixture.projectDir).then((result) => {
-        context.lastTuiSkills = result
-        return result
-      }),
-      listProbe(context.webBaseUrl, context.fixture.projectDir).then((result) => {
-        context.lastWebSkills = result
-        return result
-      }),
-    ])
-    assert.ok(tuiSkills.probe, 'TUI /skill did not return the registered probe')
-    assert.ok(webSkills.probe, 'Web /skill did not return the registered probe')
-    assert.equal(tuiSkills.probe.location, webSkills.probe.location, 'TUI and Web resolved different skill locations')
-    assert.ok(
-      tuiSkills.probe.location.includes(`${context.fixture.repoRoot}/skills/${PROBE_NAME}`),
-      `probe resolved outside migrated repo: ${tuiSkills.probe.location}`,
-    )
-    return { tui: tuiSkills, web: webSkills }
-  } catch (error) {
-    throw new RuntimeFailure(
-      'Test 1 (TUI/Web /skill discovery parity)',
-      error,
-      makeDiagnostics(context, { tuiSkillResult: context.lastTuiSkills, webSkillResult: context.lastWebSkills }),
-    )
-  }
 }
 
 function findToolParts(value) {
@@ -411,20 +388,49 @@ async function executeSkillSession(context, runtime, baseUrl) {
     const toolParts = findToolParts(messages)
     const completed = toolParts.find((part) => part.tool === 'skill' && part.state?.status === 'completed')
     assert.ok(completed, `OpenCode did not complete the skill tool: ${JSON.stringify({ toolParts, result })}`)
-    assert.match(JSON.stringify(completed), new RegExp(PROBE_MARKER))
+    assert.match(JSON.stringify(completed), new RegExp(EXPECTED_RAW_SKILL_CONTENT_MARKER))
     assert.match(JSON.stringify(result), new RegExp(SUCCESS_MARKER))
     assert.equal(context.mock.requests.length, 2, `mock observed unexpected model request count: ${context.mock.requests.length}`)
     assert.equal(context.mock.requests[0].firstRequest, true)
     assert.equal(context.mock.requests[0].toolCall.function.name, 'skill')
     assert.deepEqual(
       JSON.parse(context.mock.requests[0].toolCall.function.arguments),
-      { name: PROBE_NAME },
+      { name: SKILL_NAME },
     )
     assert.equal(context.mock.requests[1].hasProbeMarker, true)
 
     return { session, result, messages, toolParts, mockRequests: context.mock.requests.map((request) => ({ ...request })) }
   } catch (error) {
     throw new Error(`${runtime} runtime: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function runDiscoveryTest(context) {
+  try {
+    const [tuiSkills, webSkills] = await Promise.all([
+      listProbe(context.tuiBaseUrl, context.fixture.projectDir).then((result) => {
+        context.lastTuiSkills = result
+        return result
+      }),
+      listProbe(context.webBaseUrl, context.fixture.projectDir).then((result) => {
+        context.lastWebSkills = result
+        return result
+      }),
+    ])
+    assert.ok(tuiSkills.probe, 'TUI /skill did not return the registered probe')
+    assert.ok(webSkills.probe, 'Web /skill did not return the registered probe')
+    assert.equal(tuiSkills.probe.location, webSkills.probe.location, 'TUI and Web resolved different skill locations')
+    assert.ok(
+      tuiSkills.probe.location.includes(`${context.fixture.repoRoot}/skills/${SKILL_NAME}`),
+      `probe resolved outside migrated repo: ${tuiSkills.probe.location}`,
+    )
+    return { tui: tuiSkills, web: webSkills }
+  } catch (error) {
+    throw new RuntimeFailure(
+      'Test 1 (TUI/Web /skill discovery parity)',
+      error,
+      makeDiagnostics(context, { tuiSkillResult: context.lastTuiSkills, webSkillResult: context.lastWebSkills }),
+    )
   }
 }
 
@@ -453,7 +459,7 @@ async function main() {
       assert.equal(context.version, process.env.OPENCODE_EXPECTED_VERSION, 'OpenCode version is not the pinned test version')
     }
 
-    context.mock = await startMockProvider()
+    context.mock = await createMockProvider()
     context.fixture = await createFixture(root, context.mock.baseUrl)
     const tuiPort = await reservePort()
     const webPort = await reservePort()
