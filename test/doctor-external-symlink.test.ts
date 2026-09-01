@@ -48,7 +48,7 @@ async function makeSkillDiscoveryFixture(output: string): Promise<{
     opencode,
     `#!/usr/bin/env sh
 if [ "$1" = "debug" ] && [ "$2" = "skill" ]; then
-  printf '%s\\n' ${output}
+  printf '%s\\n' ${JSON.stringify(output)}
 fi
 exit 0
 `,
@@ -95,7 +95,7 @@ test('doctor accepts pre-existing external agent directories and runtime file sy
 });
 
 test('doctor reports configured skills missing from OpenCode discovery', async () => {
-  const fixture = await makeSkillDiscoveryFixture('alpha');
+  const fixture = await makeSkillDiscoveryFixture(JSON.stringify([{ name: 'alpha' }]));
   try {
     const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
     assert.equal(result.ok, false);
@@ -106,7 +106,7 @@ test('doctor reports configured skills missing from OpenCode discovery', async (
 });
 
 test('doctor accepts configured skills present in OpenCode discovery', async () => {
-  const fixture = await makeSkillDiscoveryFixture('alpha beta');
+  const fixture = await makeSkillDiscoveryFixture(JSON.stringify([{ name: 'alpha' }, { name: 'beta' }]));
   try {
     const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
     assert.equal(result.ok, true);
@@ -117,7 +117,7 @@ test('doctor accepts configured skills present in OpenCode discovery', async () 
 });
 
 test('doctor does not count a skill ID mentioned in another discovery entry as discovered', async () => {
-  const fixture = await makeSkillDiscoveryFixture("'alpha description-mentions-beta'");
+  const fixture = await makeSkillDiscoveryFixture(JSON.stringify([{ name: 'alpha', description: 'mentions beta' }]));
   try {
     const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
     assert.equal(result.ok, false);
