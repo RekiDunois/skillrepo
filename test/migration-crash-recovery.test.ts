@@ -308,6 +308,46 @@ test('rollback resumes after lock release is killed after owner removal', { skip
   }
 });
 
+test('rollback never deletes an unowned lock release tombstone', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'config-written');
+    await runCrash(f, 'rollback-started', true);
+
+    const names = await readdir(join(f.sourceRoot, '.skillrepo-migrations'));
+    const journalPath = join(
+      f.sourceRoot,
+      '.skillrepo-migrations',
+      names.find(name => name.endsWith('.json'))!,
+    );
+    const journal = JSON.parse(await readFile(journalPath, 'utf8')) as { transactionId: string };
+    const tombstone = join(
+      f.sourceRoot,
+      '.skillrepo-migrations',
+      `.${journal.transactionId}.lock.releasing`,
+    );
+    await mkdir(tombstone);
+    const sentinel = join(tombstone, 'external.txt');
+    await writeFile(sentinel, 'external data\n', 'utf8');
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({
+          planPath: f.planPath,
+          targetRoot: f.targetRoot,
+          resume: true,
+          verify: false,
+        }),
+        /rollback-incomplete|tombstone/,
+      );
+    });
+
+    assert.equal(await readFile(sentinel, 'utf8'), 'external data\n');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('rollback never deletes a temp path created after temp intent', { skip: process.platform === 'win32' }, async () => {
   const f = await fixture();
   try {

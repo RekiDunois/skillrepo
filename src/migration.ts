@@ -143,6 +143,7 @@ type JournalRegistration = {
 type MigrationJournal = {
   schemaVersion: 1;
   transactionId: string;
+  lockReleaseToken?: string;
   planPath: string;
   planFingerprint: string;
   sourceRoot: string;
@@ -214,6 +215,7 @@ export type MigrationApplyResult = {
 const JOURNAL_DIRECTORY = '.skillrepo-migrations';
 const STAGING_DIRECTORY = '.skillrepo-migration-staging';
 const LOCK_DIRECTORY = '.skillrepo-migration.lock';
+const LOCK_RELEASE_PROOF = '.release-proof.json';
 const STAGING_MARKER = '.owner.json';
 const DIRECTORY_MARKER = '.skillrepo-directory-owner.json';
 const COMPAT_MARKER = '.skillrepo-compat.json';
@@ -754,6 +756,10 @@ function lockTombstonePath(sourceRoot: string, transactionId: string): string {
   return join(journalDirectory(sourceRoot), `.${transactionId}.lock.releasing`);
 }
 
+function lockReleaseProofPath(lockDirectory: string): string {
+  return join(lockDirectory, LOCK_RELEASE_PROOF);
+}
+
 function makeStagePath(stagingRoot: string, operationId: string): string {
   return join(stagingRoot, operationId);
 }
@@ -890,7 +896,7 @@ async function readJson(path: string): Promise<Record<string, unknown>> {
   return raw as Record<string, unknown>;
 }
 
-async function acquireLock(sourceRoot: string, transactionId: string): Promise<void> {
+async function acquireLock(sourceRoot: string, transactionId: string, lockReleaseToken?: string): Promise<void> {
   const path = lockPath(sourceRoot);
   const temporary = join(journalDirectory(sourceRoot), `.${transactionId}.lock.tmp`);
   try {
@@ -901,9 +907,16 @@ async function acquireLock(sourceRoot: string, transactionId: string): Promise<v
     await mkdir(temporary, { mode: 0o700 });
     await writeFile(
       join(temporary, 'owner.json'),
-      `${JSON.stringify({ transactionId, sourceRoot, pid: process.pid, createdAt: now() }, null, 2)}\n`,
+      `${JSON.stringify({ transactionId, sourceRoot, lockReleaseToken, pid: process.pid, createdAt: now() }, null, 2)}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
+    if (lockReleaseToken) {
+      await writeFile(
+        lockReleaseProofPath(temporary),
+        `${JSON.stringify({ transactionId, sourceRoot, lockReleaseToken }, null, 2)}\n`,
+        { encoding: 'utf8', mode: 0o600 },
+      );
+    }
     crashAfter('lock-owner-staged');
     await rename(temporary, path);
   } catch (error) {
@@ -933,7 +946,7 @@ async function lockOwner(sourceRoot: string): Promise<string | undefined> {
   return typeof metadata.transactionId === 'string' ? metadata.transactionId : undefined;
 }
 
-async function releaseLock(sourceRoot: string, transactionId: string): Promise<void> {
+async function releaseLock(sourceRoot: string, transactionId: string, lockReleaseToken?: string): Promise<void> {
   const path = lockPath(sourceRoot);
   const tombstone = lockTombstonePath(sourceRoot, transactionId);
   if (await lexists(tombstone)) {
@@ -941,11 +954,24 @@ async function releaseLock(sourceRoot: string, transactionId: string): Promise<v
     if (!tombstoneStat?.isDirectory() || tombstoneStat.isSymbolicLink()) {
       throw new Error(`Migration lock release tombstone is not a real directory: ${tombstone}`);
     }
+    const proofPath = lockReleaseProofPath(tombstone);
+    const proofStat = await tryLstat(proofPath);
+    if (!proofStat?.isFile() || proofStat.isSymbolicLink()) {
+      throw new Error(`Migration lock release tombstone ownership is not provable: ${tombstone}`);
+    }
+    let proof: Record<string, unknown>;
     try {
-      const metadata = await readJson(join(tombstone, 'owner.json'));
-      if (metadata.transactionId !== transactionId) throw new Error(`Refusing to remove migration lock tombstone owned by ${String(metadata.transactionId)}`);
-    } catch (error) {
-      if (!(error instanceof Error && error.message.startsWith('Invalid skillrepo transaction metadata'))) throw error;
+      proof = await readJson(proofPath);
+    } catch {
+      throw new Error(`Migration lock release tombstone ownership is not provable: ${tombstone}`);
+    }
+    if (
+      proof.transactionId !== transactionId
+      || proof.sourceRoot !== sourceRoot
+      || !lockReleaseToken
+      || proof.lockReleaseToken !== lockReleaseToken
+    ) {
+      throw new Error(`Refusing to remove migration lock tombstone owned by ${String(proof.transactionId)}`);
     }
     await rm(tombstone, { recursive: true, force: true });
   }
@@ -2313,7 +2339,7 @@ async function rollbackTransaction(journal: MigrationJournal): Promise<{ complet
 
   if (!issues.length) {
     try {
-      await releaseLock(journal.sourceRoot, journal.transactionId);
+      await releaseLock(journal.sourceRoot, journal.transactionId, journal.lockReleaseToken);
     } catch (error) {
       issues.push(error instanceof Error ? error.message : String(error));
     }
@@ -2620,6 +2646,7 @@ async function createJournal(
   const journal: MigrationJournal = {
     schemaVersion: 1,
     transactionId,
+    lockReleaseToken: randomUUID(),
     planPath,
     planFingerprint,
     sourceRoot,
@@ -2706,7 +2733,7 @@ async function executeTransaction(
   journal.status = 'committed';
   await persistJournal(journal);
   await cleanCommittedSecrets(journal);
-  await releaseLock(journal.sourceRoot, journal.transactionId);
+  await releaseLock(journal.sourceRoot, journal.transactionId, journal.lockReleaseToken);
 
   return {
     dryRun: false,
@@ -2837,7 +2864,7 @@ async function resumeOrRecover(
       if (failures.length) throw new Error(`OpenCode discovery verification failed:\n${failures.map(result => `${result.command}: ${result.stderr.trim() || 'verification failed'}`).join('\n')}`);
     }
     await cleanCommittedSecrets(journal);
-    if (owner === journal.transactionId) await releaseLock(journal.sourceRoot, journal.transactionId);
+    if (owner === journal.transactionId) await releaseLock(journal.sourceRoot, journal.transactionId, journal.lockReleaseToken);
     return resultFromJournal(journal, options, verification);
   }
 
@@ -2850,7 +2877,7 @@ async function resumeOrRecover(
   if (journal.status === 'rollback-in-progress') {
     const owner = await lockOwner(journal.sourceRoot);
     if (owner && owner !== journal.transactionId) throw new Error(`Migration source root is locked by transaction ${owner}`);
-    if (!owner) await acquireLock(journal.sourceRoot, journal.transactionId);
+    if (!owner) await acquireLock(journal.sourceRoot, journal.transactionId, journal.lockReleaseToken);
     const rollback = await rollbackTransaction(journal);
     const status = rollback.complete ? 'rollback-complete' : 'rollback-incomplete';
     throw new Error(
@@ -2863,7 +2890,7 @@ async function resumeOrRecover(
 
   const owner = await lockOwner(journal.sourceRoot);
   if (owner && owner !== journal.transactionId) throw new Error(`Migration source root is locked by transaction ${owner}`);
-  if (!owner) await acquireLock(journal.sourceRoot, journal.transactionId);
+  if (!owner) await acquireLock(journal.sourceRoot, journal.transactionId, journal.lockReleaseToken);
   const rollback = await rollbackTransaction(journal);
   const status = rollback.complete ? 'rollback-complete' : 'rollback-incomplete';
   throw new Error(
@@ -2931,7 +2958,7 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
   try {
     // Persist the transaction identity before taking the lock so a crash in
     // this boundary leaves a journal that --resume can safely inspect.
-    await acquireLock(sourceRoot, transactionId);
+    await acquireLock(sourceRoot, transactionId, journal.lockReleaseToken);
     lockAcquired = true;
     await assertFreshState(preflightResult.operations, configSnapshot);
     return await executeTransaction(journal, preflightResult, options);
