@@ -106,6 +106,7 @@ function withoutInheritedRepositoryContext(env: NodeJS.ProcessEnv): NodeJS.Proce
   delete clean.GIT_DIR;
   delete clean.GIT_WORK_TREE;
   delete clean.GIT_INDEX_FILE;
+  delete clean.GIT_COMMON_DIR;
   return clean;
 }
 
