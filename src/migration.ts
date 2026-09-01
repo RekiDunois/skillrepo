@@ -110,6 +110,7 @@ type JournalOperation = MoveOperation & {
     linked: string[];
     skipped: string[];
     state?: 'creating' | 'complete';
+    removalState?: 'removing-marker' | 'removed';
   };
   skillShimStagePath?: string;
   generatedAgentBackupPath?: string;
@@ -1019,20 +1020,28 @@ async function recoverCompatibilityOwnership(journal: MigrationJournal): Promise
       }
     }
 
-    if (!operation.skillShim || !(await lexists(operation.source))) continue;
+    if (!operation.skillShim || !(await lexists(operation.source)) || !(await lexists(operation.target))) continue;
     const sourceStat = await tryLstat(operation.source);
     if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink()) {
       throw new Error(`Interrupted skill compatibility path is not a real directory: ${operation.source}`);
     }
     const markerPath = join(operation.source, COMPAT_MARKER);
+    operation.skillShim.markerPath = markerPath;
+    operation.skillShimIdentity ??= identityFromStat(sourceStat);
+    const markerStat = await tryLstat(markerPath);
+    if (!markerStat && operation.skillShim.removalState === 'removing-marker') {
+      if ((await readdir(operation.source)).length > 0) {
+        throw new Error(`Interrupted skill compatibility shim contains unknown files: ${operation.source}`);
+      }
+      await persistJournal(journal);
+      continue;
+    }
     const metadata = await readJson(markerPath);
     if (metadata.transactionId !== journal.transactionId
       || metadata.operationId !== operation.operationId
       || metadata.target !== operation.target) {
       throw new Error(`Interrupted skill compatibility shim owner mismatch: ${operation.source}`);
     }
-    operation.skillShim.markerPath = markerPath;
-    operation.skillShimIdentity ??= identityFromStat(sourceStat);
     const linked = Array.isArray(metadata.linked)
       ? metadata.linked.filter((value): value is string => typeof value === 'string')
       : [];
@@ -1501,17 +1510,36 @@ async function verifySkillShim(operation: JournalOperation, journal: MigrationJo
 }
 
 async function removeSkillShim(operation: JournalOperation, journal: MigrationJournal): Promise<string[]> {
+  const shim = operation.skillShim;
+  if (!shim) return [];
   if (!(await lexists(operation.source))) return [];
   const issues: string[] = [];
   const sourceStat = await tryLstat(operation.source);
   if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink()) return [`Refusing to remove unknown skill compatibility path: ${operation.source}`];
+  if (!(await lexists(operation.target))
+    && await fingerprintPath(operation.source) === operation.sourceFingerprint
+    && sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity)) return [];
   if (!sameIdentity(operation.skillShimIdentity, identityFromStat(sourceStat))) {
     return [`Refusing to remove externally recreated skill compatibility path: ${operation.source}`];
   }
 
+  const markerPath = join(operation.source, COMPAT_MARKER);
+  if (!(await lexists(markerPath))) {
+    if (shim.removalState !== 'removing-marker') {
+      return [`Refusing to remove skill compatibility shim without its owner marker: ${operation.source}`];
+    }
+    if ((await readdir(operation.source)).length > 0) {
+      return [`Unknown files remain in skill compatibility shim ${operation.source}`];
+    }
+    await rm(operation.source, { recursive: true, force: true });
+    shim.removalState = 'removed';
+    await persistJournal(journal);
+    return [];
+  }
+
   let metadata: Record<string, unknown>;
   try {
-    metadata = await readJson(join(operation.source, COMPAT_MARKER));
+    metadata = await readJson(markerPath);
   } catch (error) {
     return [error instanceof Error ? error.message : String(error)];
   }
@@ -1551,18 +1579,31 @@ async function removeSkillShim(operation: JournalOperation, journal: MigrationJo
     issues.push(`Unknown files remain in skill compatibility shim ${operation.source}: ${unknown.join(', ')}`);
     return issues;
   }
-  await unlink(join(operation.source, COMPAT_MARKER)).catch(error => {
+  shim.removalState = 'removing-marker';
+  await persistJournal(journal);
+  await unlink(markerPath).catch(error => {
     issues.push(`Cannot remove compatibility marker ${operation.source}: ${error instanceof Error ? error.message : String(error)}`);
   });
-  if (!issues.length) await rm(operation.source, { recursive: true }).catch(error => {
-    issues.push(`Cannot remove compatibility directory ${operation.source}: ${error instanceof Error ? error.message : String(error)}`);
-  });
+  if (!issues.length) {
+    crashAfter('rollback-skill-shim-marker-removed');
+    await rm(operation.source, { recursive: true }).catch(error => {
+      issues.push(`Cannot remove compatibility directory ${operation.source}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (!issues.length) {
+      shim.removalState = 'removed';
+      await persistJournal(journal);
+    }
+  }
   return issues;
 }
 
 async function removeFileCompatibility(operation: JournalOperation): Promise<string[]> {
   if (!operation.fileCompatibilityCreated) return [];
   const issues: string[] = [];
+  const sourceStat = await tryLstat(operation.source);
+  if (sourceStat && !sourceStat.isSymbolicLink()
+    && await fingerprintPath(operation.source) === operation.sourceFingerprint
+    && sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity)) return [];
   for (const path of operation.compatibilityPaths) {
     if (!(await lexists(path))) continue;
     const pathStat = await tryLstat(path);
@@ -1660,12 +1701,12 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
   }
 
   if (operation.generatedAgentBackupPath) {
-    const original = await readFile(operation.generatedAgentBackupPath, 'utf8');
     const current = await fingerprintPath(operation.source);
     if (current === operation.sourceFingerprint) return issues;
     if (current !== operation.targetFingerprint && current !== operation.stagedFingerprint) {
       return [`Agent source changed during rollback: ${operation.source}`];
     }
+    const original = await readFile(operation.generatedAgentBackupPath, 'utf8');
     await writeFile(operation.source, original, 'utf8');
   }
 
@@ -1892,6 +1933,9 @@ async function rollbackTransaction(journal: MigrationJournal): Promise<{ complet
     for (const operation of journal.operations) {
       if (!operation.generatedAgentBackupPath) continue;
       await unlink(operation.generatedAgentBackupPath).catch(() => undefined);
+      crashAfter('rollback-agent-backup-removed');
+      operation.generatedAgentBackupPath = undefined;
+      await persistJournal(journal);
     }
   }
 

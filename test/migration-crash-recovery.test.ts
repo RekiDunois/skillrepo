@@ -152,6 +152,8 @@ test('migration rollback resumes after rollback itself is killed', { skip: proce
     { initial: 'config-written', rollback: 'rollback-config-restored' },
     { initial: 'agent-registration-symlink-created', rollback: 'rollback-agent-link-removed' },
     { initial: 'file-compatibility-symlink-created', rollback: 'rollback-target-restored' },
+    { initial: 'skill-compatibility-symlink-created', rollback: 'rollback-skill-shim-marker-removed' },
+    { initial: 'config-written', rollback: 'rollback-agent-backup-removed' },
   ] as const;
 
   for (const scenario of cases) {
