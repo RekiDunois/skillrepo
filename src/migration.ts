@@ -8,6 +8,7 @@ import {
   readdir,
   readlink,
   rename,
+  rmdir,
   rm,
   stat,
   symlink,
@@ -959,6 +960,11 @@ async function releaseLock(sourceRoot: string, transactionId: string, lockReleas
     if (!proofStat?.isFile() || proofStat.isSymbolicLink()) {
       throw new Error(`Migration lock release tombstone ownership is not provable: ${tombstone}`);
     }
+    const entries = await readdir(tombstone, { withFileTypes: true });
+    const allowedEntries = new Set([LOCK_RELEASE_PROOF, 'owner.json']);
+    if (entries.some(entry => !entry.isFile() || !allowedEntries.has(entry.name))) {
+      throw new Error(`Migration lock release tombstone contains unknown entries: ${tombstone}`);
+    }
     let proof: Record<string, unknown>;
     try {
       proof = await readJson(proofPath);
@@ -973,7 +979,25 @@ async function releaseLock(sourceRoot: string, transactionId: string, lockReleas
     ) {
       throw new Error(`Refusing to remove migration lock tombstone owned by ${String(proof.transactionId)}`);
     }
-    await rm(tombstone, { recursive: true, force: true });
+    const ownerPath = join(tombstone, 'owner.json');
+    const ownerStat = await tryLstat(ownerPath);
+    if (ownerStat) {
+      if (!ownerStat.isFile() || ownerStat.isSymbolicLink()) {
+        throw new Error(`Migration lock release tombstone owner is not a regular file: ${tombstone}`);
+      }
+      let owner: Record<string, unknown>;
+      try {
+        owner = await readJson(ownerPath);
+      } catch {
+        throw new Error(`Migration lock release tombstone owner is not valid: ${tombstone}`);
+      }
+      if (owner.transactionId !== transactionId || owner.sourceRoot !== sourceRoot) {
+        throw new Error(`Refusing to remove migration lock tombstone owned by ${String(owner.transactionId)}`);
+      }
+    }
+    await unlink(proofPath);
+    if (ownerStat) await unlink(ownerPath);
+    await rmdir(tombstone);
   }
   if (!(await lexists(path))) return;
   const owner = await lockOwner(sourceRoot);
