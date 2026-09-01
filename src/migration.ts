@@ -761,6 +761,10 @@ function lockReleaseProofPath(lockDirectory: string): string {
   return join(lockDirectory, LOCK_RELEASE_PROOF);
 }
 
+function lockReleaseCleanupProofPath(sourceRoot: string, transactionId: string): string {
+  return join(journalDirectory(sourceRoot), `.${transactionId}.lock.cleanup-proof`);
+}
+
 function makeStagePath(stagingRoot: string, operationId: string): string {
   return join(stagingRoot, operationId);
 }
@@ -950,26 +954,57 @@ async function lockOwner(sourceRoot: string): Promise<string | undefined> {
 async function releaseLock(sourceRoot: string, transactionId: string, lockReleaseToken?: string): Promise<void> {
   const path = lockPath(sourceRoot);
   const tombstone = lockTombstonePath(sourceRoot, transactionId);
+  const cleanupProof = lockReleaseCleanupProofPath(sourceRoot, transactionId);
+  if (!(await lexists(tombstone)) && await lexists(cleanupProof)) {
+    const cleanupProofStat = await tryLstat(cleanupProof);
+    if (!cleanupProofStat?.isFile() || cleanupProofStat.isSymbolicLink()) {
+      throw new Error(`Migration lock release cleanup proof is not a regular file: ${cleanupProof}`);
+    }
+    let proof: Record<string, unknown>;
+    try {
+      proof = await readJson(cleanupProof);
+    } catch {
+      throw new Error(`Migration lock release proof is not valid: ${cleanupProof}`);
+    }
+    if (
+      proof.transactionId !== transactionId
+      || proof.sourceRoot !== sourceRoot
+      || !lockReleaseToken
+      || proof.lockReleaseToken !== lockReleaseToken
+    ) {
+      throw new Error(`Refusing to remove migration lock cleanup proof owned by ${String(proof.transactionId)}`);
+    }
+    await unlink(cleanupProof);
+  }
   if (await lexists(tombstone)) {
     const tombstoneStat = await tryLstat(tombstone);
     if (!tombstoneStat?.isDirectory() || tombstoneStat.isSymbolicLink()) {
       throw new Error(`Migration lock release tombstone is not a real directory: ${tombstone}`);
     }
     const proofPath = lockReleaseProofPath(tombstone);
+    const cleanupProofStat = await tryLstat(cleanupProof);
+    if (cleanupProofStat && (!cleanupProofStat.isFile() || cleanupProofStat.isSymbolicLink())) {
+      throw new Error(`Migration lock release cleanup proof is not a regular file: ${cleanupProof}`);
+    }
     const proofStat = await tryLstat(proofPath);
-    if (!proofStat?.isFile() || proofStat.isSymbolicLink()) {
+    if (cleanupProofStat && proofStat) {
+      throw new Error(`Migration lock release tombstone contains duplicate ownership proofs: ${tombstone}`);
+    }
+    const activeProofPath = cleanupProofStat ? cleanupProof : proofPath;
+    const activeProofStat = cleanupProofStat ?? proofStat;
+    if (!activeProofStat?.isFile() || activeProofStat.isSymbolicLink()) {
       throw new Error(`Migration lock release tombstone ownership is not provable: ${tombstone}`);
     }
     const entries = await readdir(tombstone, { withFileTypes: true });
-    const allowedEntries = new Set([LOCK_RELEASE_PROOF, 'owner.json']);
+    const allowedEntries = new Set([...(cleanupProofStat ? [] : [LOCK_RELEASE_PROOF]), 'owner.json']);
     if (entries.some(entry => !entry.isFile() || !allowedEntries.has(entry.name))) {
       throw new Error(`Migration lock release tombstone contains unknown entries: ${tombstone}`);
     }
     let proof: Record<string, unknown>;
     try {
-      proof = await readJson(proofPath);
+      proof = await readJson(activeProofPath);
     } catch {
-      throw new Error(`Migration lock release tombstone ownership is not provable: ${tombstone}`);
+      throw new Error(`Migration lock release proof is not valid: ${activeProofPath}`);
     }
     if (
       proof.transactionId !== transactionId
@@ -995,9 +1030,13 @@ async function releaseLock(sourceRoot: string, transactionId: string, lockReleas
         throw new Error(`Refusing to remove migration lock tombstone owned by ${String(owner.transactionId)}`);
       }
     }
-    await unlink(proofPath);
+    if (!cleanupProofStat) {
+      await rename(proofPath, cleanupProof);
+      crashAfter('rollback-lock-release-proof-removed');
+    }
     if (ownerStat) await unlink(ownerPath);
     await rmdir(tombstone);
+    await unlink(cleanupProof);
   }
   if (!(await lexists(path))) return;
   const owner = await lockOwner(sourceRoot);
@@ -1008,7 +1047,7 @@ async function releaseLock(sourceRoot: string, transactionId: string, lockReleas
     await unlink(join(tombstone, 'owner.json'));
     crashAfter('rollback-lock-owner-removed');
   }
-  await rm(tombstone, { recursive: true, force: true });
+  await releaseLock(sourceRoot, transactionId, lockReleaseToken);
 }
 
 async function ensureDirectoryPath(path: string, journal: MigrationJournal): Promise<void> {
