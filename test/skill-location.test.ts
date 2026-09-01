@@ -59,7 +59,7 @@ test('locates a configured skill and follows an agent directory symlink', async 
     const globalSkill = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'global-skill', '--project-root', projectRoot], env)).stdout);
     assert.equal(globalSkill.path, await realpath(join(configDir, 'skills', 'global-skill', 'SKILL.md')));
 
-    const agent = JSON.parse((await runLocator(['--kind', 'agent', '--name', 'worker', '--project-root', projectRoot], env)).stdout);
+    const agent = JSON.parse((await runLocator(['--kind', 'agent', '--name', 'external-repo/worker', '--project-root', projectRoot], env)).stdout);
     assert.equal(agent.path, await realpath(join(agentRepo, 'agents', 'worker.md')));
     assert.equal(agent.frontmatterName, null);
     assert.equal(agent.git.managed, true);

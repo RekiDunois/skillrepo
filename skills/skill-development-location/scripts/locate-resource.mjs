@@ -146,15 +146,17 @@ function existsSync(path) {
   }
 }
 
-function resolveConfiguredPath(source, configFile) {
+function resolveConfiguredPath(source, projectRoot) {
   const expanded = expandHome(source);
-  return resolve(isAbsolute(expanded) ? expanded : join(dirname(configFile), expanded));
+  return resolve(isAbsolute(expanded) ? expanded : join(projectRoot, expanded));
 }
 
-function sourceDirectories(sources, configFile) {
+function sourceDirectories(sources, projectRoot) {
   const directories = [];
-  for (const source of sources) {
-    const pattern = resolveConfiguredPath(source, configFile);
+  for (const configuredSource of sources) {
+    const source = typeof configuredSource === 'string' ? configuredSource : configuredSource.path;
+    const recursive = typeof configuredSource === 'string' || configuredSource.recursive !== false;
+    const pattern = resolveConfiguredPath(source, projectRoot);
     let matches;
     try {
       matches = hasGlob(pattern) ? globSync(pattern, { dot: true }) : [pattern];
@@ -163,7 +165,7 @@ function sourceDirectories(sources, configFile) {
     }
     for (const match of matches) {
       try {
-        if (statSync(match).isDirectory()) directories.push({ configured: source, path: match });
+        if (statSync(match).isDirectory()) directories.push({ configured: source, path: match, recursive });
       } catch {
         // Missing sources are reported in the JSON result and do not abort other roots.
       }
@@ -174,7 +176,7 @@ function sourceDirectories(sources, configFile) {
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.venv', 'venv', '__pycache__']);
 
-async function collectMarkdownFiles(root) {
+async function collectMarkdownFiles(root, recursive = true) {
   const files = [];
   const visited = new Set();
 
@@ -204,7 +206,7 @@ async function collectMarkdownFiles(root) {
       } catch {
         continue;
       }
-      if (childStat.isDirectory()) {
+      if (childStat.isDirectory() && recursive) {
         await walk(logicalChild);
       } else if (childStat.isFile() && entry.name.endsWith('.md')) {
         files.push({ path: await realpath(child), logicalPath: logicalChild });
@@ -228,19 +230,19 @@ function standardSources(kind, configDir, projectRoot) {
     ];
   }
   return [
-    join(projectRoot, '.opencode', 'agents'),
-    join(projectRoot, '.opencode', 'agent'),
-    join(projectRoot, '.opencode', 'modes'),
-    join(projectRoot, '.opencode', 'mode'),
+    { path: join(projectRoot, '.opencode', 'agents') },
+    { path: join(projectRoot, '.opencode', 'agent') },
+    { path: join(projectRoot, '.opencode', 'modes'), recursive: false },
+    { path: join(projectRoot, '.opencode', 'mode'), recursive: false },
     join(projectRoot, '.claude', 'agents'),
-    join(configDir, 'agents'),
-    join(configDir, 'agent'),
-    join(configDir, 'modes'),
-    join(configDir, 'mode'),
+    { path: join(configDir, 'agents') },
+    { path: join(configDir, 'agent') },
+    { path: join(configDir, 'modes'), recursive: false },
+    { path: join(configDir, 'mode'), recursive: false },
     join(homedir(), '.claude', 'agents'),
-    join(homedir(), '.claude', 'agent'),
-    join(homedir(), '.claude', 'modes'),
-    join(homedir(), '.claude', 'mode'),
+    { path: join(homedir(), '.claude', 'agent') },
+    { path: join(homedir(), '.claude', 'modes'), recursive: false },
+    { path: join(homedir(), '.claude', 'mode'), recursive: false },
   ];
 }
 
@@ -252,7 +254,7 @@ function pathResourceId(kind, sourceRoot, logicalPath) {
     return value.slice(0, -'/SKILL.md'.length);
   }
   if (!value.endsWith('.md')) return null;
-  return basename(value, '.md');
+  return value.slice(0, -'.md'.length);
 }
 
 function resourceIds(kind, sourceRoot, logicalPath, metadataName) {
@@ -260,7 +262,7 @@ function resourceIds(kind, sourceRoot, logicalPath, metadataName) {
   if (!pathId) return [];
   const v1Id = metadataName ?? (kind === 'skill'
     ? basename(dirname(logicalPath))
-    : basename(pathId));
+    : pathId);
   return [...new Set([v1Id, pathId])];
 }
 
@@ -310,15 +312,15 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
   const configured = kind === 'skill'
     ? configuredPaths(data.skills)
     : configuredPaths(data.agents);
-  const configuredRoots = sourceDirectories(configured, configFile);
+  const configuredRoots = sourceDirectories(configured, projectRoot);
   const roots = [
-    ...sourceDirectories(standardSources(kind, configDir, projectRoot), configFile),
+    ...sourceDirectories(standardSources(kind, configDir, projectRoot), projectRoot),
     ...configuredRoots,
   ];
   const candidates = [];
 
   for (const root of roots) {
-    for (const file of await collectMarkdownFiles(root.path)) {
+    for (const file of await collectMarkdownFiles(root.path, root.recursive)) {
       const metadataName = await frontmatterName(file.path);
       const identifiers = resourceIds(kind, root.path, file.logicalPath, metadataName);
       if (!identifiers.includes(name)) continue;

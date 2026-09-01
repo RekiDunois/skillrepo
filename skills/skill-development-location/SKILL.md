@@ -30,9 +30,9 @@ node /absolute/path/to/skills/skill-development-location/scripts/locate-resource
   --project-root "$(pwd)"
 ```
 
-The locator returns JSON containing the V1-compatible resource `id`, accepted `identifiers`, resolved real `path`, `sourceRoot`, source-relative path, config path, optional frontmatter metadata, and Git state. For V1, a skill uses frontmatter `name` when present and an agent uses frontmatter `name` when present; otherwise they fall back to the containing skill directory or agent filename. The path-derived ID is also accepted as an alias. Use the returned `path` and `gitRoot`, not a guessed path. A non-zero result means the resource is missing or ambiguous; do not edit until the ambiguity is resolved.
+The locator returns JSON containing the V1-compatible resource `id`, accepted `identifiers`, resolved real `path`, `sourceRoot`, source-relative path, config path, optional frontmatter metadata, and Git state. For V1, a skill uses frontmatter `name` when present and an agent uses frontmatter `name` when present; otherwise they fall back to the containing skill directory or the agent's source-relative path. The path-derived ID is also accepted as an alias. Legacy `mode/` and `modes/` roots are scanned only at one level, matching V1. Use the returned `path` and `gitRoot`, not a guessed path. A non-zero result means the resource is missing or ambiguous; do not edit until the ambiguity is resolved.
 
-Frontmatter `name` is returned as metadata and participates in V1 identity when present. Agents without a `name` field remain locatable by filename, and path-derived aliases preserve compatibility with newer discovery behavior.
+Frontmatter `name` is returned as metadata and participates in V1 identity when present. Agents without a `name` field remain locatable by their source-relative path, and path-derived aliases preserve compatibility with newer discovery behavior.
 
 ## Plan parallel work
 
