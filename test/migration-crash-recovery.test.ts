@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
@@ -366,6 +366,35 @@ test('rollback resumes after restore temp creation before identity persist', { s
       await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
       '---\ndescription: test\nmode: subagent\n---\nworker\n',
     );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('rollback never adopts a same-content replacement after agent restore publish', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'config-written');
+    await runCrash(f, 'rollback-agent-restore-published-before-identity', true);
+
+    const source = join(f.sourceRoot, 'agents', 'worker.md');
+    const original = await readFile(source, 'utf8');
+    const replacement = `${source}.external`;
+    await writeFile(replacement, original, 'utf8');
+    await rename(replacement, source);
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({
+          planPath: f.planPath,
+          targetRoot: f.targetRoot,
+          resume: true,
+          verify: false,
+        }),
+        /rollback-incomplete/,
+      );
+    });
+    assert.equal(await readFile(source, 'utf8'), original);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

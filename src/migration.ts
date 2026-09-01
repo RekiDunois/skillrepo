@@ -835,10 +835,15 @@ async function replaceAgentFileAtomically(
       operation.generatedAgentPublishState = 'publish-intent';
       await persistJournal(journal);
       crashAfter('agent-stable-name-publish-state-persisted');
+    } else if (partialCrashLabel === 'rollback-agent-restore-partial-write') {
+      operation.generatedAgentRestoredIdentity = operation.generatedAgentTemporaryIdentity;
+      await persistJournal(journal);
     }
     await rename(temporary, path);
     if (partialCrashLabel === 'agent-stable-name-partial-write') {
       crashAfter('agent-stable-name-published');
+    } else if (partialCrashLabel === 'rollback-agent-restore-partial-write') {
+      crashAfter('rollback-agent-restore-published-before-identity');
     }
     operation.generatedAgentTemporaryPath = undefined;
     operation.generatedAgentTemporaryIdentity = undefined;
@@ -1974,6 +1979,10 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
       if (!sameIdentity(identity, operation.sourceIdentity)) {
         if (operation.generatedAgentRestoreState !== 'pending' && operation.generatedAgentRestoreState !== 'restored') {
           return [`Restored agent source identity is not recognized: ${operation.source}`];
+        }
+        if (operation.generatedAgentRestoredIdentity
+          && !sameIdentity(identity, operation.generatedAgentRestoredIdentity)) {
+          return [`Restored agent source identity was replaced outside transaction: ${operation.source}`];
         }
         operation.generatedAgentRestoredIdentity = identity;
         operation.generatedAgentRestoreState = 'restored';
