@@ -1,5 +1,6 @@
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -98,6 +99,7 @@ type JournalOperation = MoveOperation & {
   sourceFingerprint: string;
   sourceIdentity: PathIdentity;
   targetPrecondition: 'absent';
+  stageOwnershipPath?: string;
   targetFingerprint?: string;
   targetIdentity?: PathIdentity;
   stagedFingerprint?: string;
@@ -1236,7 +1238,15 @@ async function prepareOperations(journal: MigrationJournal): Promise<void> {
 
     operation.stagedFingerprint = operation.sourceFingerprint;
     operation.stagedIdentity = operation.sourceIdentity;
+    const sourceStat = await lstat(operation.source);
+    if (sourceStat.isFile()) operation.stageOwnershipPath = join(journal.stagingRoot, `${operation.operationId}.ownership`);
     await persistJournal(journal);
+    if (operation.stageOwnershipPath) {
+      if (await lexists(operation.stageOwnershipPath)) {
+        throw new Error(`Transaction staging ownership path already exists: ${operation.stageOwnershipPath}`);
+      }
+      await link(operation.source, operation.stageOwnershipPath);
+    }
     await rename(operation.source, operation.stagePath);
     crashAfter(`source-staged-${operation.operationId}`);
     operation.state = 'staged';
@@ -1731,6 +1741,12 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
     if (operation.stagedIdentity && !sameIdentity(await pathIdentity(operation.stagePath), operation.stagedIdentity)) {
       return [`Staging content was recreated outside transaction: ${operation.stagePath}`];
     }
+    if (operation.stageOwnershipPath) {
+      if (!sameIdentity(await pathIdentity(operation.stageOwnershipPath), operation.stagedIdentity)
+        || !sameIdentity(await pathIdentity(operation.stagePath), await pathIdentity(operation.stageOwnershipPath))) {
+        return [`Staging content ownership proof changed outside transaction: ${operation.stagePath}`];
+      }
+    }
     if (await lexists(operation.source)) {
       const sourceFingerprint = await fingerprintPath(operation.source);
       if (sourceFingerprint !== operation.sourceFingerprint
@@ -1848,7 +1864,11 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
       const entries = await readdir(journal.stagingRoot);
       const ownedEntries = new Set([
         STAGING_MARKER,
-        ...journal.operations.flatMap(operation => [operation.stagePath, operation.skillShimStagePath ?? ''])
+        ...journal.operations.flatMap(operation => [
+          operation.stagePath,
+          operation.stageOwnershipPath ?? '',
+          operation.skillShimStagePath ?? '',
+        ])
           .filter(path => path && dirname(path) === journal.stagingRoot)
           .map(path => basename(path)),
       ]);
@@ -1862,6 +1882,10 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
           if (operation.stagedIdentity && !sameIdentity(await pathIdentity(operation.stagePath), operation.stagedIdentity)) {
             return [`Staging content was recreated outside transaction: ${operation.stagePath}`];
           }
+        }
+        if (operation.stageOwnershipPath && await lexists(operation.stageOwnershipPath)
+          && !sameIdentity(await pathIdentity(operation.stageOwnershipPath), operation.sourceIdentity)) {
+          return [`Staging ownership proof was replaced outside transaction: ${operation.stageOwnershipPath}`];
         }
       }
       for (const operation of journal.operations) {
@@ -2142,7 +2166,6 @@ async function validateInterruptedState(journal: MigrationJournal): Promise<void
         throw new Error(`Interrupted transaction staging was modified: ${operation.stagePath}`);
       }
     }
-
     const sourceExists = await lexists(operation.source);
     if (sourceExists && !operation.skillShim && !operation.fileCompatibilityCreated) {
       if ((await fingerprintPath(operation.source)) !== operation.sourceFingerprint
@@ -2480,6 +2503,10 @@ function ensureJournalIdentity(
     }
     if (operation.generatedAgentBackupPath && !isPathWithin(journalDirectory(sourceRoot), operation.generatedAgentBackupPath)) {
       throw new Error(`Migration journal contains an unsafe agent backup path: ${operation.operationId}`);
+    }
+    if (operation.stageOwnershipPath
+      && operation.stageOwnershipPath !== join(expectedStaging, `${operation.operationId}.ownership`)) {
+      throw new Error(`Migration journal contains an unsafe staging ownership path: ${operation.operationId}`);
     }
     if (operation.compatibilityPaths.some(path => !isPathWithin(sourceRoot, path))) {
       throw new Error(`Migration journal contains an unsafe compatibility path: ${operation.operationId}`);
