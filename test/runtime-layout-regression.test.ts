@@ -23,3 +23,25 @@ test('registered repo resolver preserves a legacy repo whose basename is .apm', 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('package registration does not expose its internal .apm directory as repo id .apm', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-runtime-package-dot-apm-'));
+  const configDir = join(root, 'opencode');
+  const repo = join(root, 'package-repo');
+  const skills = join(repo, '.apm', 'skills');
+  const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+
+  try {
+    await mkdir(skills, { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'opencode.jsonc'), `{"skills":[${JSON.stringify(skills)}]}\n`, 'utf8');
+
+    assert.equal(await resolveRegisteredRepo('package-repo', env), repo);
+    await assert.rejects(
+      resolveRegisteredRepo('.apm', env),
+      /Registered repo not found: \.apm/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
