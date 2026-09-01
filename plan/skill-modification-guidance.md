@@ -2,10 +2,8 @@
 
 ## 状态
 
-- 状态：待实现
-- 目标分支：`feat/skill-modification-guidance`
-- 本阶段交付：本计划文档
-- 本阶段不修改生产代码、不新增 skill 文件
+- 状态：已实现
+- 实现内容：指导 skill、文件级迁移映射、handoff 模板渲染、CLI 集成和 runtime/回归测试
 
 ## 背景
 
@@ -378,4 +376,4 @@ opencode debug skill
 - 默认只 stdout 输出模板，还是同时提供显式 `--template-out`：建议两者都支持，但文件输出必须 opt-in 且 no-clobber。
 - `--no-verify` 是否输出降级模板：建议输出带“未验证”警告的模板，不能输出完全成功标记。
 - 是否把事务配置路径和 `skillMappings` 直接加入 `MigrationApplyResult`：建议只加入模板真正需要且不会泄露额外 journal 内容的字段；locator 仍使用现有的 `config` / `git.gitRoot` 字段。
-- 新 skill 是否随 skillrepo 自身注册，还是由下一次迁移计划纳入目标 skill repo：实现时必须选择一种实际安装路径，并用真实 OpenCode discovery 验证，不能只在源树中测试。
+- 新 skill 随 skillrepo 自身发布；通过 `skillrepo register <skillrepo-root>` 注册 `skills/`，并由真实 OpenCode discovery/runtime 测试验证。

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": { "skillrepo": "./dist/src/cli.js" },
-  "files": ["dist/src", "scripts", "templates", "README.md"],
+  "files": ["dist/src", "scripts", "skills", "templates", "README.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",

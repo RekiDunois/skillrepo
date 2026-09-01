@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import {
   assertNoRuntimeCollisions,
   doctor,
@@ -18,9 +21,10 @@ import { classifyMigrationPortability, renderMigrationPortability } from './port
 import { applyMigrationPortabilityFixes, renderMigrationPortabilityFix } from './portability_fix.js';
 import { auditMigrationCommitReadiness } from './readiness.js';
 import { execRegisteredResource, installedSkillrepoSupportsExec } from './runtime.js';
+import { renderSkillModificationHandoff } from './skill_modification_template.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify] [--template-out <file>]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
   process.exit(2);
 }
 
@@ -218,6 +222,7 @@ async function main(): Promise<void> {
         execute: { type: 'boolean', default: false },
         resume: { type: 'boolean', default: false },
         verify: { type: 'boolean', default: true },
+        'template-out': { type: 'string' },
       },
     });
     if (positionals.length || !values['target-root']) usage();
@@ -231,6 +236,9 @@ async function main(): Promise<void> {
     });
 
     if (result.dryRun) {
+      if (values['template-out']) {
+        throw new Error('--template-out requires a committed migration; dry-run produced no handoff');
+      }
       if (result.transactionId) console.log(`Transaction: ${result.transactionId} (${result.status ?? 'unknown'}, phase ${result.phase ?? 'unknown'})`);
       if (result.journalPath) console.log(`Transaction journal: ${result.journalPath}`);
       if (values.resume) {
@@ -263,6 +271,32 @@ async function main(): Promise<void> {
     console.log(`Compatibility paths: ${result.compatibilityPaths.length}`);
     if (result.verification.length && !printVerification(result.verification)) {
       throw new Error('OpenCode verification failed after migration. Run skillrepo doctor for details.');
+    }
+    if (!result.skillMappings.length) {
+      if (values['template-out']) {
+        throw new Error('--template-out requires at least one migrated skill');
+      }
+      console.log('No skill moves; no skill modification handoff generated.');
+      return;
+    }
+
+    if (!result.transactionId || !result.journalPath) {
+      throw new Error('Committed migration is missing transaction identity required for the skill modification handoff');
+    }
+    const handoff = renderSkillModificationHandoff({
+      ...result,
+      transactionId: result.transactionId,
+      journalPath: result.journalPath,
+    });
+    console.log(handoff);
+    if (values['template-out']) {
+      const outputPath = resolve(values['template-out']!.replace(/^~(?=\/|$)/, homedir()));
+      try {
+        await writeFile(outputPath, handoff, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      } catch (error) {
+        throw new Error(`Cannot write handoff template without overwriting ${outputPath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      console.log(`Skill modification handoff written: ${outputPath}`);
     }
     return;
   }

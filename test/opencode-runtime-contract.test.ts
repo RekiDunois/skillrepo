@@ -33,8 +33,23 @@ test("OpenCode runtime parity probe must load the registered skill inside the mo
     "the skill tool call must target the externally registered fixture skill",
   );
   assert.match(
+    mockProvider,
+    /hasSkillAdvertisement/,
+    "the deterministic model must verify the skill advertisement",
+  );
+  assert.match(
+    mockProvider,
+    /修改 skill/,
+    "the deterministic model request must contain the modification intent",
+  );
+  assert.match(
     executeSession,
     /EXPECTED_RAW_SKILL_CONTENT_MARKER/,
     "the runtime session must verify that the completed skill-tool result contains the fixture's unique content marker",
+  );
+  assert.match(
+    executeSession,
+    /skill-modification/,
+    "the runtime request must name the skill-modification skill",
   );
 });

@@ -18,6 +18,8 @@ import {
 import { homedir } from 'node:os';
 import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { parseFrontmatter } from './frontmatter.js';
 import {
@@ -55,6 +57,23 @@ type MigrationPlan = {
 
 export type MoveKind = 'skill' | 'agent' | 'lib';
 
+export type SkillMapping = {
+  operationId?: string;
+  repoId: string;
+  skillId: string;
+  sourceFile: string;
+  targetFile: string;
+};
+
+export type MigrationGitState = {
+  managed: boolean;
+  gitRoot?: string;
+  branch?: string;
+  dirty?: boolean;
+};
+
+type UnboundSkillMapping = Omit<SkillMapping, 'operationId'>;
+
 export type MoveOperation = {
   kind: MoveKind;
   repoId: string;
@@ -63,6 +82,7 @@ export type MoveOperation = {
   relativeSource: string;
   expectedSkillId?: string;
   expectedSkillIds?: string[];
+  skillMappings?: UnboundSkillMapping[];
   expectedAgentName?: string;
   sourceFingerprint?: string;
   sourceIdentity?: PathIdentity;
@@ -142,7 +162,7 @@ type JournalRegistration = {
 };
 
 type MigrationJournal = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   transactionId: string;
   lockReleaseToken?: string;
   planPath: string;
@@ -178,6 +198,9 @@ type MigrationJournal = {
     rollbackState?: 'pending' | 'restoring' | 'restored';
   };
   registration?: JournalRegistration;
+  skillMappings: Array<SkillMapping & { operationId: string }>;
+  verification: { requested: boolean; passed: boolean };
+  targetGit?: Record<string, MigrationGitState>;
 };
 
 type PreflightResult = {
@@ -185,6 +208,7 @@ type PreflightResult = {
   repositories: string[];
   expectedSkillIds: string[];
   expectedAgentNames: string[];
+  skillMappings: UnboundSkillMapping[];
   prospectiveConfig: ReturnType<typeof prospectiveOpenCodeConfig>;
   existingInventories: Map<string, RepoInventory>;
 };
@@ -211,6 +235,10 @@ export type MigrationApplyResult = {
   phase?: MigrationPhase;
   status?: MigrationStatus | 'dry-run';
   rollbackStatus?: 'not-needed' | 'rollback-complete' | 'rollback-incomplete';
+  configPath: string;
+  skillMappings: SkillMapping[];
+  verified: boolean;
+  git: Record<string, MigrationGitState>;
 };
 
 const JOURNAL_DIRECTORY = '.skillrepo-migrations';
@@ -221,6 +249,7 @@ const STAGING_MARKER = '.owner.json';
 const DIRECTORY_MARKER = '.skillrepo-directory-owner.json';
 const COMPAT_MARKER = '.skillrepo-compat.json';
 const ABSENT_FINGERPRINT = 'absent';
+const execFileAsync = promisify(execFile);
 
 function expandHome(path: string): string {
   if (path === '~') return homedir();
@@ -581,6 +610,12 @@ async function validateOperationSource(operation: MoveOperation): Promise<MoveOp
       ...result,
       expectedSkillId: rootSkill.id,
       expectedSkillIds: skills.map(skill => skill.id),
+      skillMappings: skills.map(skill => ({
+        repoId: operation.repoId,
+        skillId: skill.id,
+        sourceFile: skill.path,
+        targetFile: join(operation.target, relative(operation.source, skill.path)),
+      })),
     };
   } else if (operation.kind === 'agent' && operation.target.endsWith('.md')) {
     const meta = await readFrontmatter(operation.source);
@@ -618,6 +653,7 @@ async function preflight(
   const operations: MoveOperation[] = [];
   const expectedSkillIds: string[] = [];
   const expectedAgentNames: string[] = [];
+  const skillMappings: UnboundSkillMapping[] = [];
   const skillOwners = new Map<string, string>();
   const agentOwners = new Map<string, string>();
 
@@ -631,6 +667,7 @@ async function preflight(
     if (await lexists(operation.target)) throw new Error(`Migration target already exists: ${operation.target}`);
 
     const operationWithMetadata = await validateOperationSource(operation);
+    skillMappings.push(...(operationWithMetadata.skillMappings ?? []));
     if (operationWithMetadata.sourceIdentity?.dev !== targetDevice) {
       throw new Error(`Cannot mechanically mv across filesystems: ${operation.source} -> ${operation.target}. Choose a target root on the same filesystem.`);
     }
@@ -736,6 +773,7 @@ async function preflight(
     repositories,
     expectedSkillIds,
     expectedAgentNames,
+    skillMappings,
     prospectiveConfig,
     existingInventories,
   };
@@ -2578,7 +2616,7 @@ function journalMatchesPlan(
   operations: MoveOperation[],
 ): boolean {
   if (
-    journal.schemaVersion !== 1
+    journal.schemaVersion !== 2
     || journal.planPath !== planPath
     || journal.planFingerprint !== planFingerprint
     || journal.sourceRoot !== sourceRoot
@@ -2595,6 +2633,41 @@ function journalNeedsRecovery(journal: MigrationJournal): boolean {
     || journal.status === 'rollback-incomplete';
 }
 
+async function inspectTargetGit(
+  repositories: string[],
+  targetRoot: string,
+): Promise<Record<string, MigrationGitState>> {
+  const entries = await Promise.all(repositories.map(async repoId => {
+    const repoRoot = join(targetRoot, repoId);
+    try {
+      const rootResult = await execFileAsync('git', ['-C', repoRoot, 'rev-parse', '--show-toplevel'], {
+        encoding: 'utf8',
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      });
+      const gitRoot = resolve(rootResult.stdout.trim());
+      const [branchResult, statusResult] = await Promise.all([
+        execFileAsync('git', ['-C', repoRoot, 'symbolic-ref', '--quiet', '--short', 'HEAD'], {
+          encoding: 'utf8',
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        }).catch(() => ({ stdout: '' })),
+        execFileAsync('git', ['-C', repoRoot, 'status', '--porcelain'], {
+          encoding: 'utf8',
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        }),
+      ]);
+      return [repoId, {
+        managed: true,
+        gitRoot,
+        branch: branchResult.stdout.trim() || undefined,
+        dirty: statusResult.stdout.length > 0,
+      } satisfies MigrationGitState] as const;
+    } catch {
+      return [repoId, { managed: false } satisfies MigrationGitState] as const;
+    }
+  }));
+  return Object.fromEntries(entries);
+}
+
 async function loadJournals(sourceRoot: string): Promise<MigrationJournal[]> {
   const directory = journalDirectory(sourceRoot);
   if (!(await lexists(directory))) return [];
@@ -2608,7 +2681,8 @@ async function loadJournals(sourceRoot: string): Promise<MigrationJournal[]> {
     if (!entry.isFile()) throw new Error(`Migration journal entry is not a file: ${join(directory, entry.name)}`);
     const path = join(directory, entry.name);
     const value = await readJson(path);
-    if (value.schemaVersion !== 1 || typeof value.transactionId !== 'string' || !Array.isArray(value.operations)) {
+    if (value.schemaVersion !== 2 || typeof value.transactionId !== 'string' || !Array.isArray(value.operations)
+      || !Array.isArray(value.skillMappings) || !value.verification || typeof value.verification !== 'object') {
       throw new Error(`Unsupported or invalid migration journal: ${path}`);
     }
     journals.push(value as unknown as MigrationJournal);
@@ -2638,11 +2712,12 @@ async function matchingJournal(
   return matches[0];
 }
 
-function resultFromJournal(
+async function resultFromJournal(
   journal: MigrationJournal,
   options: MigrationApplyOptions,
   verification: VerifyResult[],
-): MigrationApplyResult {
+): Promise<MigrationApplyResult> {
+  const git = journal.targetGit ?? await inspectTargetGit(journal.repositories, journal.targetRoot);
   return {
     dryRun: options.dryRun === true,
     sourceRoot: journal.sourceRoot,
@@ -2657,6 +2732,10 @@ function resultFromJournal(
     phase: journal.phase,
     status: journal.status,
     rollbackStatus: 'not-needed',
+    configPath: journal.config.path,
+    skillMappings: journal.skillMappings,
+    verified: journal.verification.passed,
+    git,
   };
 }
 
@@ -2683,6 +2762,7 @@ async function createJournal(
   targetRoot: string,
   preflightResult: PreflightResult,
   configSnapshot: OpenCodeConfigSnapshot,
+  verifyRuntime: boolean,
 ): Promise<MigrationJournal> {
   const directory = journalDirectory(sourceRoot);
   const directoryStat = await tryLstat(directory);
@@ -2694,20 +2774,34 @@ async function createJournal(
 
   const journalPath = join(directory, `${transactionId}.json`);
   const stagingRoot = join(sourceRoot, STAGING_DIRECTORY, transactionId);
-  const operations: JournalOperation[] = preflightResult.operations.map((operation, index) => ({
-    ...operation,
-    operationId: `op-${String(index + 1).padStart(4, '0')}`,
-    stagePath: makeStagePath(stagingRoot, `op-${String(index + 1).padStart(4, '0')}`),
-    state: 'pending',
-    sourceFingerprint: operation.sourceFingerprint!,
-    sourceIdentity: operation.sourceIdentity!,
-    targetPrecondition: 'absent',
-    compatibilityPaths: [],
-    compatibilityIdentities: {},
-  }));
+  const operations: JournalOperation[] = preflightResult.operations.map((operation, index) => {
+    const { skillMappings: _skillMappings, ...operationWithoutMappings } = operation;
+    return {
+      ...operationWithoutMappings,
+      operationId: `op-${String(index + 1).padStart(4, '0')}`,
+      stagePath: makeStagePath(stagingRoot, `op-${String(index + 1).padStart(4, '0')}`),
+      state: 'pending',
+      sourceFingerprint: operation.sourceFingerprint!,
+      sourceIdentity: operation.sourceIdentity!,
+      targetPrecondition: 'absent',
+      compatibilityPaths: [],
+      compatibilityIdentities: {},
+    };
+  });
+  const skillMappings = preflightResult.skillMappings.map(mapping => {
+    const operation = operations.find(candidate => (
+      candidate.kind === 'skill'
+      && candidate.repoId === mapping.repoId
+      && isPathWithin(candidate.source, mapping.sourceFile)
+    ));
+    if (!operation) {
+      throw new Error(`Skill mapping has no owning migration operation: ${mapping.sourceFile}`);
+    }
+    return { ...mapping, operationId: operation.operationId };
+  });
   const configDirectoryExisted = await lexists(dirname(configSnapshot.path));
   const journal: MigrationJournal = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     transactionId,
     lockReleaseToken: randomUUID(),
     planPath,
@@ -2739,6 +2833,8 @@ async function createJournal(
       changed: false,
       rollbackState: 'pending',
     },
+    skillMappings,
+    verification: { requested: verifyRuntime, passed: false },
   };
   await persistJournal(journal);
   return journal;
@@ -2784,6 +2880,8 @@ async function executeTransaction(
     if (failures.length) {
       throw new Error(`OpenCode discovery verification failed:\n${failures.map(result => `${result.command}: ${result.stderr.trim() || 'verification failed'}`).join('\n')}`);
     }
+    journal.verification.passed = true;
+    await persistJournal(journal);
   }
   await assertConfigPostWriteState(journal);
   await assertAgentRegistrationLinksCurrent(journal);
@@ -2794,6 +2892,7 @@ async function executeTransaction(
 
   journal.phase = 'committed';
   journal.status = 'committed';
+  journal.targetGit = await inspectTargetGit(journal.repositories, journal.targetRoot);
   await persistJournal(journal);
   await cleanCommittedSecrets(journal);
   await releaseLock(journal.sourceRoot, journal.transactionId, journal.lockReleaseToken);
@@ -2812,6 +2911,10 @@ async function executeTransaction(
     phase: journal.phase,
     status: journal.status,
     rollbackStatus: 'not-needed',
+    configPath: journal.config.path,
+    skillMappings: journal.skillMappings,
+    verified: journal.verification.passed,
+    git: journal.targetGit,
   };
 }
 
@@ -2839,6 +2942,38 @@ function ensureJournalIdentity(
   }
   if (journal.config.path !== resolve(opencodeConfigFile())) {
     throw new Error(`Migration journal config path is not owned by its transaction: ${journal.transactionId}`);
+  }
+
+  const expectedMappingCount = journal.operations
+    .filter(operation => operation.kind === 'skill')
+    .reduce((count, operation) => count + (operation.expectedSkillIds?.length ?? 0), 0);
+  if (journal.skillMappings.length !== expectedMappingCount) {
+    throw new Error(`Migration journal skill mapping count is not owned by its transaction: ${journal.transactionId}`);
+  }
+  const mappingIds = new Map<string, number>();
+  for (const mapping of journal.skillMappings) {
+    const operation = journal.operations.find(candidate => candidate.operationId === mapping.operationId);
+    if (!operation || operation.kind !== 'skill' || operation.repoId !== mapping.repoId
+      || !operation.expectedSkillIds?.includes(mapping.skillId)
+      || basename(mapping.sourceFile) !== 'SKILL.md'
+      || basename(mapping.targetFile) !== 'SKILL.md'
+      || !isPathWithin(operation.source, mapping.sourceFile)
+      || !isPathWithin(operation.target, mapping.targetFile)
+      || mapping.targetFile !== join(operation.target, relative(operation.source, mapping.sourceFile))) {
+      throw new Error(`Migration journal skill mapping is not owned by its transaction: ${journal.transactionId}`);
+    }
+    const key = `${mapping.operationId}\0${mapping.skillId}`;
+    mappingIds.set(key, (mappingIds.get(key) ?? 0) + 1);
+  }
+  for (const operation of journal.operations.filter(candidate => candidate.kind === 'skill')) {
+    for (const skillId of operation.expectedSkillIds ?? []) {
+      if (mappingIds.get(`${operation.operationId}\0${skillId}`) !== 1) {
+        throw new Error(`Migration journal skill mapping is incomplete: ${journal.transactionId}`);
+      }
+    }
+  }
+  if (typeof journal.verification?.requested !== 'boolean' || typeof journal.verification?.passed !== 'boolean') {
+    throw new Error(`Migration journal verification state is not valid: ${journal.transactionId}`);
   }
 
   for (let index = 0; index < journal.operations.length; index += 1) {
@@ -2928,7 +3063,11 @@ async function resumeOrRecover(
     }
     await cleanCommittedSecrets(journal);
     if (owner === journal.transactionId) await releaseLock(journal.sourceRoot, journal.transactionId, journal.lockReleaseToken);
-    return resultFromJournal(journal, options, verification);
+    if (options.verify !== false && !journal.verification.passed) {
+      journal.verification.passed = true;
+      await persistJournal(journal);
+    }
+    return await resultFromJournal(journal, options, verification);
   }
 
   if (journal.status === 'rollback-incomplete') {
@@ -2949,7 +3088,7 @@ async function resumeOrRecover(
     );
   }
   await validateInterruptedState(journal);
-  if (options.dryRun) return resultFromJournal(journal, options, []);
+  if (options.dryRun) return await resultFromJournal(journal, options, []);
 
   const owner = await lockOwner(journal.sourceRoot);
   if (owner && owner !== journal.transactionId) throw new Error(`Migration source root is locked by transaction ${owner}`);
@@ -3007,6 +3146,10 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
       phase: 'preflight',
       status: 'dry-run',
       rollbackStatus: 'not-needed',
+      configPath: configSnapshot.path,
+      skillMappings: preflightResult.skillMappings,
+      verified: false,
+      git: {},
     };
   }
 
@@ -3015,7 +3158,16 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
     throw new Error(`Migration plan changed during preflight: ${planPath}`);
   }
   const transactionId = randomUUID();
-  const journal = await createJournal(transactionId, planPath, planFingerprint, sourceRoot, targetRoot, preflightResult, configSnapshot);
+  const journal = await createJournal(
+    transactionId,
+    planPath,
+    planFingerprint,
+    sourceRoot,
+    targetRoot,
+    preflightResult,
+    configSnapshot,
+    options.verify !== false,
+  );
   crashAfter('journal-created');
   let lockAcquired = false;
   try {
