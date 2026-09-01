@@ -23,6 +23,14 @@ async function locateGit(): Promise<string> {
   throw new Error('Git executable not found on test PATH');
 }
 
+async function writePlan(path: string, repoId: string): Promise<void> {
+  await writeFile(
+    path,
+    `${JSON.stringify({ schemaVersion: 1, repositories: [{ id: repoId, action: 'CREATE_AND_MOVE' }] }, null, 2)}\n`,
+    'utf8',
+  );
+}
+
 test('initialized repository ignores inherited GIT_COMMON_DIR from another repo', async () => {
   const gitPath = await locateGit();
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-git-common-dir-'));
@@ -36,11 +44,7 @@ test('initialized repository ignores inherited GIT_COMMON_DIR from another repo'
   try {
     await mkdir(targetRepo, { recursive: true });
     await mkdir(otherRepo, { recursive: true });
-    await writeFile(
-      plan,
-      `${JSON.stringify({ schemaVersion: 1, repositories: [{ id: 'target-repo', action: 'CREATE_AND_MOVE' }] }, null, 2)}\n`,
-      'utf8',
-    );
+    await writePlan(plan, 'target-repo');
 
     await execFileAsync(gitPath, ['init', '--quiet', targetRepo]);
     await execFileAsync(gitPath, ['init', '--quiet', otherRepo]);
@@ -75,6 +79,32 @@ test('initialized repository ignores inherited GIT_COMMON_DIR from another repo'
       access(join(targetRepo, '.gitignore')),
       'polluted GIT_COMMON_DIR must not cause a redundant root .gitignore',
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('uninitialized oracle does not inherit GIT_COMMON_DIR excludes from another repo', async () => {
+  const gitPath = await locateGit();
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-git-common-dir-temp-'));
+  const targetRoot = join(root, 'repos');
+  const targetRepo = join(targetRoot, 'target-repo');
+  const otherRepo = join(root, 'other-repo');
+  const plan = join(root, 'migration-plan.json');
+
+  try {
+    await mkdir(targetRepo, { recursive: true });
+    await mkdir(otherRepo, { recursive: true });
+    await writePlan(plan, 'target-repo');
+    await execFileAsync(gitPath, ['init', '--quiet', otherRepo]);
+    await writeFile(join(otherRepo, '.git', 'info', 'exclude'), '*.tmp\n', 'utf8');
+    await writeFile(join(targetRepo, 'scratch.tmp'), 'must remain unignored in uninitialized target\n', 'utf8');
+
+    const pollutedEnv = { ...process.env, GIT_COMMON_DIR: join(otherRepo, '.git') };
+    const audit = await auditMigrationRepos({ planPath: plan, targetRoot, gitPath, env: pollutedEnv });
+    const candidates = audit.repositories[0]!.ignoreCandidates.flatMap(item => item.paths);
+    assert.equal(candidates.includes('scratch.tmp'), true, 'temporary oracle must not inherit another repo info/exclude');
+    await assert.rejects(access(join(targetRepo, '.git')), 'temporary oracle must not initialize the target repo');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
