@@ -34,6 +34,7 @@ test('package registration does not expose its internal .apm directory as repo i
   try {
     await mkdir(skills, { recursive: true });
     await mkdir(configDir, { recursive: true });
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\n', 'utf8');
     await writeFile(join(configDir, 'opencode.jsonc'), `{"skills":[${JSON.stringify(skills)}]}\n`, 'utf8');
 
     assert.equal(await resolveRegisteredRepo('package-repo', env), repo);

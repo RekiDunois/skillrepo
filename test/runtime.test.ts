@@ -73,6 +73,7 @@ test('registered resource resolver derives package repo root from .apm skill reg
     await mkdir(skills, { recursive: true });
     await mkdir(join(repo, 'bin'), { recursive: true });
     await mkdir(configDir, { recursive: true });
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\n', 'utf8');
     await writeFile(join(configDir, 'opencode.jsonc'), `{"skills":[${JSON.stringify(skills)}]}\n`, 'utf8');
     await writeFile(script, '#!/usr/bin/env bash\nprintf "package-runtime:%s\\n" "$1"\n', 'utf8');
     await chmod(script, 0o755);
@@ -94,6 +95,7 @@ test('registered resource resolver derives package repo root from .apm agent reg
   try {
     await mkdir(agents, { recursive: true });
     await mkdir(join(configDir, 'agents'), { recursive: true });
+    await writeFile(join(repo, 'apm.yml'), 'name: package-agent-repo\n', 'utf8');
     await writeFile(join(configDir, 'opencode.jsonc'), '{}\n', 'utf8');
     await symlink(agents, join(configDir, 'agents', 'package-agent-repo'), 'dir');
 

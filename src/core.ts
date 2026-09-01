@@ -386,9 +386,17 @@ export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
     { layout: 'skillrepo', skills: join(repo, 'skills'), agents: join(repo, 'agents'), present: false },
     { layout: 'apm', skills: join(repo, '.apm', 'skills'), agents: join(repo, '.apm', 'agents'), present: false },
   ];
+  const apmManifest = await tryLstat(join(repo, 'apm.yml'));
+  const hasApmManifest = Boolean(apmManifest?.isFile() && !apmManifest.isSymbolicLink());
   for (const candidate of candidates) {
     candidate.present = Boolean(await tryLstat(candidate.skills) || await tryLstat(candidate.agents));
   }
+
+  const apmCandidate = candidates.find(candidate => candidate.layout === 'apm')!;
+  if (apmCandidate.present && !hasApmManifest) {
+    throw new Error(`Package layout requires a regular apm.yml manifest: ${repo}`);
+  }
+  apmCandidate.present = apmCandidate.present && hasApmManifest;
 
   const activeLayouts = candidates.filter(candidate => candidate.present);
   if (activeLayouts.length === 0) throw new Error(`Repo has neither skills/ nor agents/ (or .apm/skills nor .apm/agents): ${repo}`);
