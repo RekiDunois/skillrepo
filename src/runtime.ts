@@ -50,9 +50,9 @@ function repoIdFromPath(path: string): string {
   return basename(path).trim().replace(/[^A-Za-z0-9._-]+/g, '-');
 }
 
-function repoRootFromSource(source: string): string {
+function repoRootsFromSource(source: string): string[] {
   const parent = dirname(source);
-  return basename(parent) === '.apm' ? dirname(parent) : parent;
+  return basename(parent) === '.apm' ? [parent, dirname(parent)] : [parent];
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -117,8 +117,9 @@ export async function resolveRegisteredRepo(
     if (linkStat.isSymbolicLink()) {
       const target = resolve(dirname(agentLink), await readlink(agentLink));
       if (await directoryExists(target)) {
-        const root = repoRootFromSource(target);
-        if (repoIdFromPath(root) === repoId) candidates.add(root);
+        for (const root of repoRootsFromSource(target)) {
+          if (repoIdFromPath(root) === repoId) candidates.add(root);
+        }
       }
     }
   } catch {
@@ -129,8 +130,9 @@ export async function resolveRegisteredRepo(
   for (const source of await readOpenCodeSkills(env)) {
     const skillsDir = resolveConfigSource(source, configPath);
     if (!skillsDir || basename(skillsDir) !== 'skills' || !(await directoryExists(skillsDir))) continue;
-    const root = repoRootFromSource(skillsDir);
-    if (repoIdFromPath(root) === repoId) candidates.add(root);
+    for (const root of repoRootsFromSource(skillsDir)) {
+      if (repoIdFromPath(root) === repoId) candidates.add(root);
+    }
   }
 
   if (candidates.size === 0) {
