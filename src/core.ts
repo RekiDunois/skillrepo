@@ -814,7 +814,7 @@ export async function unregisterRepo(repoInput: string): Promise<void> {
       throw new Error(`Refusing to remove non-symlink registration path: ${link}`);
     }
     const target = resolve(dirname(link), await readlink(link));
-    if (!agentSources.includes(target) && !pathIsWithin(join(repo, '.apm', 'agents'), target)) {
+    if (!agentSources.includes(target)) {
       throw new Error(`Refusing to remove symlink owned by another target: ${link} -> ${target}`);
     }
     await unlink(link);
@@ -827,7 +827,10 @@ export async function unregisterRepo(repoInput: string): Promise<void> {
       const linkStat = await lstat(path);
       if (!linkStat.isSymbolicLink()) continue;
       const target = resolve(dirname(path), await readlink(path));
-      if (pathIsWithin(packageAgents, target)) await unlink(path);
+      if (!pathIsWithin(packageAgents, target) || !target.endsWith('.agent.md')) continue;
+      const sourceRelative = relative(packageAgents, target);
+      const projectedRelative = `${sourceRelative.slice(0, -'.agent.md'.length)}.md`;
+      if (path === join(agentRoot, projectedRelative)) await unlink(path);
     }
   }
 }
