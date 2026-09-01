@@ -20,6 +20,13 @@ export type RepoInventory = {
   agentSources: AgentSource[];
 };
 
+type AgentOwnershipLink = {
+  name: string;
+  path: string;
+  target: string;
+  identity: { dev: number; ino: number };
+};
+
 type RegistrationState = { skillsRegistered: boolean; agentsRegistered: boolean };
 
 export type OpenCodeConfigSnapshot = {
@@ -311,6 +318,85 @@ function agentFileRegistrationPath(name: string): string {
   return join(opencodeConfigDir(), 'agents', `${name}.md`);
 }
 
+function agentOwnershipPath(repo: string): string {
+  return join(opencodeConfigDir(), 'registrations', `${repoId(repo)}.json`);
+}
+
+async function readAgentOwnership(repo: string): Promise<AgentOwnershipLink[]> {
+  const path = agentOwnershipPath(repo);
+  if (!(await exists(path))) return [];
+  const pathStat = await lstat(path);
+  if (pathStat.isSymbolicLink() || !pathStat.isFile()) throw new Error(`Agent ownership record is not a regular file: ${path}`);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    throw new Error(`Agent ownership record is not valid JSON: ${path}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`Agent ownership record is invalid: ${path}`);
+  const record = parsed as Record<string, unknown>;
+  if (record.schemaVersion !== 1 || record.repo !== repo) throw new Error(`Agent ownership record is invalid: ${path}`);
+  const links = record.links;
+  if (!Array.isArray(links)) throw new Error(`Agent ownership record is invalid: ${path}`);
+
+  return links.map(link => {
+    if (!link || typeof link !== 'object' || Array.isArray(link)) throw new Error(`Agent ownership record is invalid: ${path}`);
+    const value = link as Record<string, unknown>;
+    const identity = value.identity;
+    if (
+      typeof value.name !== 'string'
+      || typeof value.path !== 'string'
+      || typeof value.target !== 'string'
+      || !identity
+      || typeof identity !== 'object'
+      || Array.isArray(identity)
+      || typeof (identity as Record<string, unknown>).dev !== 'number'
+      || typeof (identity as Record<string, unknown>).ino !== 'number'
+    ) throw new Error(`Agent ownership record is invalid: ${path}`);
+    const result = {
+      name: value.name,
+      path: value.path,
+      target: value.target,
+      identity: {
+        dev: (identity as Record<string, number>).dev,
+        ino: (identity as Record<string, number>).ino,
+      },
+    };
+    const packageAgents = join(repo, '.apm', 'agents');
+    const sourceRelative = relative(packageAgents, result.target);
+    const projectedPath = sourceRelative.endsWith('.agent.md')
+      ? join(opencodeConfigDir(), 'agents', `${sourceRelative.slice(0, -'.agent.md'.length)}.md`)
+      : '';
+    if (
+      result.path !== agentFileRegistrationPath(result.name)
+      || !pathIsWithin(packageAgents, result.target)
+      || !result.target.endsWith('.agent.md')
+      || result.path !== projectedPath
+      || !Number.isFinite(result.identity.dev)
+      || !Number.isFinite(result.identity.ino)
+    ) throw new Error(`Agent ownership record is invalid: ${path}`);
+    return result;
+  });
+}
+
+async function writeAgentOwnership(repo: string, links: AgentOwnershipLink[]): Promise<void> {
+  const path = agentOwnershipPath(repo);
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = join(dirname(path), `.${basename(path)}-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, `${JSON.stringify({ schemaVersion: 1, repo, links }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await rename(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
+function sameIdentity(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
 function frontmatter(text: string): Record<string, unknown> {
   return parseFrontmatter(text).data;
 }
@@ -323,16 +409,6 @@ async function walkFiles(root: string): Promise<string[]> {
     else if (entry.isFile()) files.push(path);
   }
   return files;
-}
-
-async function walkDirectoryPaths(root: string): Promise<string[]> {
-  const paths: string[] = [];
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) paths.push(...await walkDirectoryPaths(path));
-    else if (entry.isSymbolicLink()) paths.push(path);
-  }
-  return paths;
 }
 
 async function collectSkillIds(skillsDir: string, strictDuplicates: boolean): Promise<string[]> {
@@ -757,6 +833,8 @@ export async function registerRepo(
   const inventory = await inspectRepo(repoInput);
   const collisions = await staticCollisionIssues(inventory);
   if (collisions.length) throw new Error(`Registration blocked:\n${collisions.join('\n')}`);
+  const existingOwnership = inventory.layout === 'apm' ? await readAgentOwnership(inventory.repo) : [];
+  const createdOwnership: AgentOwnershipLink[] = [];
 
   if (inventory.skillsDir) {
     const configPath = opencodeConfigFile();
@@ -770,22 +848,40 @@ export async function registerRepo(
 
   let agentLink: string | undefined;
   const agentLinks: string[] = [];
-  if (inventory.agentsDir) {
-    const targetDir = join(opencodeConfigDir(), 'agents');
-    await mkdir(targetDir, { recursive: true });
-    if (inventory.layout === 'apm') {
-      for (const source of inventory.agentSources) {
-        const path = agentFileRegistrationPath(source.name);
-        await mkdir(dirname(path), { recursive: true });
-        if (!(await lexists(path))) await symlink(source.sourcePath, path);
-        agentLinks.push(path);
-      }
-    } else {
-      agentLink = join(targetDir, repoId(inventory.repo));
-      if (!(await lexists(agentLink))) {
-        await symlink(inventory.agentsDir, agentLink, 'dir');
+  try {
+    if (inventory.agentsDir) {
+      const targetDir = join(opencodeConfigDir(), 'agents');
+      await mkdir(targetDir, { recursive: true });
+      if (inventory.layout === 'apm') {
+        for (const source of inventory.agentSources) {
+          const path = agentFileRegistrationPath(source.name);
+          await mkdir(dirname(path), { recursive: true });
+          if (!(await lexists(path))) {
+            await symlink(source.sourcePath, path);
+            const linkStat = await lstat(path);
+            createdOwnership.push({ name: source.name, path, target: source.sourcePath, identity: fileIdentity(linkStat) });
+          }
+          agentLinks.push(path);
+        }
+        if (createdOwnership.length) {
+          const ownershipByPath = new Map(existingOwnership.map(link => [link.path, link]));
+          for (const link of createdOwnership) ownershipByPath.set(link.path, link);
+          await writeAgentOwnership(inventory.repo, [...ownershipByPath.values()]);
+        }
+      } else {
+        agentLink = join(targetDir, repoId(inventory.repo));
+        if (!(await lexists(agentLink))) {
+          await symlink(inventory.agentsDir, agentLink, 'dir');
+        }
       }
     }
+  } catch (error) {
+    for (const link of [...createdOwnership].reverse()) {
+      const linkStat = await tryLstat(link.path);
+      if (!linkStat?.isSymbolicLink() || !sameIdentity(fileIdentity(linkStat), link.identity)) continue;
+      if (resolve(dirname(link.path), await readlink(link.path)) === link.target) await unlink(link.path);
+    }
+    throw error;
   }
 
   return {
@@ -820,18 +916,22 @@ export async function unregisterRepo(repoInput: string): Promise<void> {
     await unlink(link);
   }
 
-  const packageAgents = join(repo, '.apm', 'agents');
-  const agentRoot = join(opencodeConfigDir(), 'agents');
-  if (await directoryExists(agentRoot)) {
-    for (const path of await walkDirectoryPaths(agentRoot)) {
-      const linkStat = await lstat(path);
-      if (!linkStat.isSymbolicLink()) continue;
-      const target = resolve(dirname(path), await readlink(path));
-      if (!pathIsWithin(packageAgents, target) || !target.endsWith('.agent.md')) continue;
-      const sourceRelative = relative(packageAgents, target);
-      const projectedRelative = `${sourceRelative.slice(0, -'.agent.md'.length)}.md`;
-      if (path === join(agentRoot, projectedRelative)) await unlink(path);
+  const ownershipPath = agentOwnershipPath(repo);
+  if (await exists(ownershipPath)) {
+    const ownership = await readAgentOwnership(repo);
+    const removable: AgentOwnershipLink[] = [];
+    for (const owned of ownership) {
+      const current = await tryLstat(owned.path);
+      if (!current) continue;
+      if (!current.isSymbolicLink()) throw new Error(`Refusing to remove non-symlink owned agent path: ${owned.path}`);
+      const target = resolve(dirname(owned.path), await readlink(owned.path));
+      if (!sameIdentity(fileIdentity(current), owned.identity) || target !== owned.target) {
+        throw new Error(`Refusing to remove changed owned agent path: ${owned.path}`);
+      }
+      removable.push(owned);
     }
+    for (const owned of removable) await unlink(owned.path);
+    await unlink(ownershipPath);
   }
 }
 
