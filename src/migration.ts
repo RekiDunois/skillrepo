@@ -750,6 +750,10 @@ function lockPath(sourceRoot: string): string {
   return join(sourceRoot, LOCK_DIRECTORY);
 }
 
+function lockTombstonePath(sourceRoot: string, transactionId: string): string {
+  return join(journalDirectory(sourceRoot), `.${transactionId}.lock.releasing`);
+}
+
 function makeStagePath(stagingRoot: string, operationId: string): string {
   return join(stagingRoot, operationId);
 }
@@ -931,10 +935,30 @@ async function lockOwner(sourceRoot: string): Promise<string | undefined> {
 
 async function releaseLock(sourceRoot: string, transactionId: string): Promise<void> {
   const path = lockPath(sourceRoot);
+  const tombstone = lockTombstonePath(sourceRoot, transactionId);
+  if (await lexists(tombstone)) {
+    const tombstoneStat = await tryLstat(tombstone);
+    if (!tombstoneStat?.isDirectory() || tombstoneStat.isSymbolicLink()) {
+      throw new Error(`Migration lock release tombstone is not a real directory: ${tombstone}`);
+    }
+    try {
+      const metadata = await readJson(join(tombstone, 'owner.json'));
+      if (metadata.transactionId !== transactionId) throw new Error(`Refusing to remove migration lock tombstone owned by ${String(metadata.transactionId)}`);
+    } catch (error) {
+      if (!(error instanceof Error && error.message.startsWith('Invalid skillrepo transaction metadata'))) throw error;
+    }
+    await rm(tombstone, { recursive: true, force: true });
+  }
   if (!(await lexists(path))) return;
   const owner = await lockOwner(sourceRoot);
   if (owner !== transactionId) throw new Error(`Refusing to remove migration lock owned by ${owner ?? 'unknown'}`);
-  await rm(path, { recursive: true, force: true });
+  if (await lexists(tombstone)) throw new Error(`Migration lock release tombstone already exists: ${tombstone}`);
+  await rename(path, tombstone);
+  if (process.env.NODE_ENV === 'test' && process.env.SKILLREPO_TEST_CRASH_AFTER === 'rollback-lock-owner-removed') {
+    await unlink(join(tombstone, 'owner.json'));
+    crashAfter('rollback-lock-owner-removed');
+  }
+  await rm(tombstone, { recursive: true, force: true });
 }
 
 async function ensureDirectoryPath(path: string, journal: MigrationJournal): Promise<void> {

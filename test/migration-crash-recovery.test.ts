@@ -280,6 +280,34 @@ test('rollback resumes after generated-agent restore is killed mid-write', { ski
   }
 });
 
+test('rollback resumes after lock release is killed after owner removal', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'config-written');
+    await runCrash(f, 'rollback-lock-owner-removed', true);
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({
+          planPath: f.planPath,
+          targetRoot: f.targetRoot,
+          resume: true,
+          verify: false,
+        }),
+        /rollback-complete/,
+      );
+    });
+
+    await assert.rejects(access(join(f.sourceRoot, '.skillrepo-migration.lock')));
+    assert.equal(
+      await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
+      '---\ndescription: test\nmode: subagent\n---\nworker\n',
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('rollback never deletes a temp path created after temp intent', { skip: process.platform === 'win32' }, async () => {
   const f = await fixture();
   try {
