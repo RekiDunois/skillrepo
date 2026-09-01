@@ -231,7 +231,6 @@ function standardSources(kind, configDir, projectRoots) {
       { path: join(projectRoot, '.opencode', 'agent') },
       { path: join(projectRoot, '.opencode', 'modes'), recursive: false },
       { path: join(projectRoot, '.opencode', 'mode'), recursive: false },
-      join(projectRoot, '.claude', 'agents'),
     ]);
 
   if (kind === 'skill') {
@@ -240,6 +239,7 @@ function standardSources(kind, configDir, projectRoots) {
       join(configDir, 'skills'),
       join(configDir, 'skill'),
       join(homedir(), '.claude', 'skills'),
+      join(homedir(), '.agents', 'skills'),
     ];
   }
   return [
@@ -248,10 +248,6 @@ function standardSources(kind, configDir, projectRoots) {
     { path: join(configDir, 'agent') },
     { path: join(configDir, 'modes'), recursive: false },
     { path: join(configDir, 'mode'), recursive: false },
-    join(homedir(), '.claude', 'agents'),
-    { path: join(homedir(), '.claude', 'agent') },
-    { path: join(homedir(), '.claude', 'modes'), recursive: false },
-    { path: join(homedir(), '.claude', 'mode'), recursive: false },
   ];
 }
 
@@ -287,6 +283,7 @@ function pathResourceId(kind, sourceRoot, logicalPath) {
 }
 
 function resourceIds(kind, sourceRoot, logicalPath, metadataName) {
+  if (kind === 'skill' && !metadataName) return [];
   const pathId = pathResourceId(kind, sourceRoot, logicalPath);
   if (!pathId) return [];
   const v1Id = metadataName ?? (kind === 'skill'

@@ -34,8 +34,8 @@ test('locates a configured skill and follows an agent directory symlink', async 
     await mkdir(join(configDir, 'agents'), { recursive: true });
     await execFileAsync('git', ['init', '-q', agentRepo]);
     await writeFile(join(skillRoot, 'example-skill', 'SKILL.md'), '---\nname: displayed-skill\ndescription: test\n---\n', 'utf8');
-    await writeFile(join(projectRoot, '.opencode', 'skills', 'project-skill', 'SKILL.md'), '---\ndescription: test\n---\n', 'utf8');
-    await writeFile(join(configDir, 'skills', 'global-skill', 'SKILL.md'), '---\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(projectRoot, '.opencode', 'skills', 'project-skill', 'SKILL.md'), '---\nname: project-skill\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(configDir, 'skills', 'global-skill', 'SKILL.md'), '---\nname: global-skill\ndescription: test\n---\n', 'utf8');
     await writeFile(join(agentRepo, 'agents', 'worker.md'), '---\ndescription: test\n---\n', 'utf8');
     await writeFile(
       join(configDir, 'opencode.jsonc'),

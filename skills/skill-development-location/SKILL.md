@@ -16,7 +16,7 @@ Load this skill before reading or changing any OpenCode skill or agent. The path
    - `$OPENCODE_CONFIG_DIR/opencode.json`.
    - `~/.config/opencode/opencode.jsonc` as the default target when neither file exists.
    - If both config files exist, stop and ask for an explicit choice.
-3. Use the bundled locator. It reads `skills.paths`, the legacy `skills` array, optional `agents.paths`, standard project/global OpenCode roots, and compatibility roots. It walks project roots upward to the Git worktree boundary, including `.agents/skills`. It expands `~`, project-relative paths, and glob patterns, follows source symlinks, and reports the real file path.
+3. Use the bundled locator. It reads `skills.paths`, the legacy `skills` array, optional `agents.paths`, standard project/global OpenCode roots, and skill compatibility roots. It walks project roots upward to the Git worktree boundary, including `.agents/skills`; global skills include both `~/.claude/skills` and `~/.agents/skills`. Agent roots are limited to OpenCode config directories. It expands `~`, project-relative paths, and glob patterns, follows source symlinks, and reports the real file path.
 
 ```bash
 node /absolute/path/to/skills/skill-development-location/scripts/locate-resource.mjs \
@@ -32,7 +32,7 @@ node /absolute/path/to/skills/skill-development-location/scripts/locate-resource
 
 The locator returns JSON containing the V1-compatible resource `id`, accepted `identifiers`, resolved real `path`, `sourceRoot`, source-relative path, config path, optional frontmatter metadata, and Git state. V1 primary identifiers always win over compatibility aliases. For V1, a skill uses frontmatter `name` when present and an agent uses frontmatter `name` when present; otherwise they fall back to the containing skill directory or the agent's source-relative path. The path-derived ID is also accepted as an alias only when no V1 primary match exists. Legacy `mode/` and `modes/` roots are scanned only at one level, matching V1. Use the returned `path` and `gitRoot`, not a guessed path. A non-zero result means the resource is missing or ambiguous; do not edit until the ambiguity is resolved.
 
-Frontmatter `name` is returned as metadata and participates in V1 identity when present. Agents without a `name` field remain locatable by their source-relative path, and path-derived aliases preserve compatibility with newer discovery behavior.
+Frontmatter `name` is returned as metadata and participates in V1 identity when present. Agents without a `name` field remain locatable by their source-relative path. Nameless skills are rejected because OpenCode V1 does not load them. Path-derived aliases preserve compatibility with newer discovery behavior without taking precedence over V1 names.
 
 ## Plan parallel work
 
