@@ -1569,13 +1569,18 @@ async function createFileCompatibilityShim(
   await persistJournal(journal);
 }
 
-async function prepareOperations(journal: MigrationJournal): Promise<void> {
+async function prepareOperations(
+  journal: MigrationJournal,
+  selectedOperations: JournalOperation[] = journal.operations,
+  stagingReady = false,
+): Promise<void> {
   journal.phase = 'preparing';
   journal.status = 'in-progress';
   await persistJournal(journal);
-  await writeStagingMarker(journal);
+  if (stagingReady) await assertStagingOwner(journal);
+  else await writeStagingMarker(journal);
 
-  for (const operation of journal.operations) {
+  for (const operation of selectedOperations) {
     await assertCurrentFingerprint(operation.source, operation.sourceFingerprint, 'Migration source');
     if (!sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity)) {
       throw new Error(`Migration source identity changed: ${operation.source}`);
@@ -2949,14 +2954,17 @@ async function executeTransaction(
   preflightResult: PreflightResult,
   options: MigrationApplyOptions,
 ): Promise<MigrationApplyResult> {
-  await prepareOperations(journal);
-
   const canary = journal.operations.find(operation => operation.kind === 'skill');
   const canaryMoved = options.verify !== false && Boolean(canary);
   if (canaryMoved && canary) {
+    await prepareOperations(journal, [canary]);
     await moveOperation(canary, journal);
     await registerTransaction(journal, preflightResult, true, [canary]);
     await runRuntimeVerification(journal, options, 'canary-runtime-verification', [canary]);
+    const remaining = journal.operations.filter(operation => operation !== canary);
+    if (remaining.length) await prepareOperations(journal, remaining, true);
+  } else {
+    await prepareOperations(journal);
   }
 
   journal.phase = 'committing';

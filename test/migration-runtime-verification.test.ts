@@ -141,6 +141,33 @@ test('a successful canary does not replace final runtime verification', async ()
   }
 });
 
+test('canary verification leaves non-canary sources untouched until the gate passes', async () => {
+  const f = await fixture();
+  const oldPath = process.env.PATH;
+  try {
+    await withConfigDir(f.sourceRoot, async () => {
+      process.env.PATH = `${f.bin}${delimiter}${oldPath ?? ''}`;
+      const result = await applyMigration({
+        planPath: f.planPath,
+        targetRoot: f.targetRoot,
+        projectDir: f.root,
+        runtimeVerifier: async context => {
+          if (context.phase === 'canary-runtime-verification') {
+            await access(join(f.sourceRoot, 'skill', 'beta', 'SKILL.md'));
+            await assert.rejects(access(join(f.targetRoot, 'demo-repo', 'skills', 'beta', 'SKILL.md')));
+          }
+          return passed(context.phase);
+        },
+      });
+      assert.equal(result.status, 'committed');
+    });
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('final runtime failure rolls back the complete batch', async () => {
   const f = await fixture();
   const oldPath = process.env.PATH;
