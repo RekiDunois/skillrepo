@@ -4,8 +4,8 @@ import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-const START_MARKER = '# BEGIN skillrepo symlink-safe shim path';
-const END_MARKER = '# END skillrepo symlink-safe shim path';
+const START_MARKER = '# BEGIN skillrepo symlink-safe browser-pdf-core path';
+const END_MARKER = '# END skillrepo symlink-safe browser-pdf-core path';
 const MAX_SYMLINK_DEPTH = 40;
 
 function usage() {
@@ -18,7 +18,8 @@ Defaults:
 Behavior:
   - dry-run by default
   - resolves the OpenCode wrapper symlink to the real chrome-devtools forwarding shim
-  - patches only the shim's SCRIPT_DIR assignment so it resolves its own symlink before locating browser-pdf-core
+  - replaces exactly one hard-coded CORE_DIR=.../browser-pdf-core assignment
+  - resolves the shim's own symlink before locating sibling browser-pdf-core
   - preserves the OpenCode symlink, implementation wrapper, Chrome profile, and existing exec arguments
   - creates a timestamped backup of the shim before writing
 `);
@@ -69,7 +70,7 @@ async function resolveFileTarget(inputPath) {
   throw new Error('Wrapper symlink resolution failed');
 }
 
-function symlinkSafeScriptDirBlock() {
+function symlinkSafeCoreDirBlock() {
   return `${START_MARKER}
 _skillrepo_shim_source="$0"
 _skillrepo_shim_hops=0
@@ -86,14 +87,15 @@ while [ -L "$_skillrepo_shim_source" ]; do
     *) _skillrepo_shim_source="$_skillrepo_shim_dir/$_skillrepo_shim_target" ;;
   esac
 done
-SCRIPT_DIR="$(CDPATH= cd -P -- "$(dirname -- "$_skillrepo_shim_source")" && pwd)" || exit 126
-unset _skillrepo_shim_source _skillrepo_shim_hops _skillrepo_shim_dir _skillrepo_shim_target
+_skillrepo_shim_dir="$(CDPATH= cd -P -- "$(dirname -- "$_skillrepo_shim_source")" && pwd)" || exit 126
+CORE_DIR="$(CDPATH= cd -P -- "$_skillrepo_shim_dir/../browser-pdf-core" && pwd)" || exit 126
+unset _skillrepo_shim_source _skillrepo_shim_hops _skillrepo_shim_target _skillrepo_shim_dir
 ${END_MARKER}`;
 }
 
 function patchShim(text) {
   if (text.includes(START_MARKER) || text.includes(END_MARKER)) {
-    if (text.includes(START_MARKER) && text.includes(END_MARKER)) return { alreadyPatched: true, text };
+    if (text.includes(START_MARKER) && text.includes(END_MARKER)) return { alreadyPatched: true, text, originalCoreDir: null };
     throw new Error('Shim contains only one symlink-safe marker; refusing to modify a partial patch');
   }
 
@@ -104,19 +106,20 @@ function patchShim(text) {
   const lines = text.split(/(?<=\n)/);
   const matches = [];
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (/^\s*SCRIPT_DIR=/.test(line) && /dirname/.test(line) && /\$0|\$\{0\}/.test(line)) matches.push(i);
+    const bare = lines[i].replace(/\r?\n$/, '');
+    const match = bare.match(/^\s*CORE_DIR\s*=\s*(["']?)([^"'\r\n]*browser-pdf-core\/?)(?:\1)\s*$/);
+    if (match) matches.push({ index: i, value: match[2] });
   }
   if (matches.length !== 1) {
-    const candidates = text.split(/\r?\n/).filter(line => /SCRIPT_DIR|CORE_DIR|dirname|chrome-mcp-wrapper/.test(line));
+    const candidates = text.split(/\r?\n/).filter(line => /CORE_DIR|browser-pdf-core|chrome-mcp-wrapper/.test(line));
     const detail = candidates.length ? `\nObserved shim lines:\n${candidates.map(line => `  ${line}`).join('\n')}` : '';
-    throw new Error(`Expected exactly one SCRIPT_DIR assignment derived from $0, found ${matches.length}.${detail}`);
+    throw new Error(`Expected exactly one CORE_DIR assignment ending in browser-pdf-core, found ${matches.length}.${detail}`);
   }
 
-  const index = matches[0];
+  const { index, value } = matches[0];
   const newline = lines[index].endsWith('\r\n') ? '\r\n' : '\n';
-  lines[index] = `${symlinkSafeScriptDirBlock().replaceAll('\n', newline)}${newline}`;
-  return { alreadyPatched: false, text: lines.join('') };
+  lines[index] = `${symlinkSafeCoreDirBlock().replaceAll('\n', newline)}${newline}`;
+  return { alreadyPatched: false, text: lines.join(''), originalCoreDir: value };
 }
 
 function backupPath(path) {
@@ -142,9 +145,11 @@ async function main() {
   for (const link of resolved.chain) console.log(`WRAPPER LINK: ${link.path} -> ${link.rawTarget}`);
   console.log(`SHIM TARGET: ${resolved.targetPath}`);
   if (patched.alreadyPatched) {
-    console.log('ALREADY-PATCHED: shim already resolves its own symlink before computing SCRIPT_DIR.');
+    console.log('ALREADY-PATCHED: shim already resolves sibling browser-pdf-core from its real path.');
     return;
   }
+  console.log(`OLD CORE_DIR: ${patched.originalCoreDir}`);
+  console.log('NEW CORE_DIR: <real shim dir>/../browser-pdf-core');
   console.log(`MODE: ${args.execute ? 'EXECUTE' : 'DRY-RUN'}`);
   console.log('IMPLEMENTATION WRAPPER: unchanged');
   console.log('PROFILE DATA: unchanged');
