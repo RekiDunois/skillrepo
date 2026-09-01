@@ -11,6 +11,10 @@ const migrationRuntimeScript = fs.readFileSync(
   path.join(process.cwd(), "scripts", "opencode-runtime-verify.mjs"),
   "utf8",
 );
+const runtimeModule = fs.readFileSync(
+  path.join(process.cwd(), "src", "runtime.ts"),
+  "utf8",
+);
 
 function functionBody(name: string, nextName: string): string {
   const start = runtimeScript.search(new RegExp(`(?:async\\s+)?function\\s+${name}\\b`));
@@ -80,4 +84,13 @@ test("migration runtime verification keeps config files and resource directories
     /join\(originalResourceDir, ['"]plugins['"]\)/,
   );
   assert.match(migrationRuntimeScript, /OPENCODE_CONFIG_DIR/);
+});
+
+test("runtime verification resolves OpenCode env paths before switching helper cwd", () => {
+  const start = runtimeModule.indexOf("export async function verifyOpenCodeRuntime");
+  assert.ok(start >= 0);
+  const body = runtimeModule.slice(start);
+
+  assert.match(body, /OPENCODE_CONFIG\s*:\s*context\.configPath/);
+  assert.match(body, /OPENCODE_CONFIG_DIR\s*:\s*opencodeConfigDir\(env\)/);
 });

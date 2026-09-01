@@ -229,10 +229,15 @@ export async function verifyOpenCodeRuntime(
   const helperPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../scripts/opencode-runtime-verify.mjs');
   try {
     await writeFile(inputPath, `${JSON.stringify(context)}\n`, { encoding: 'utf8', mode: 0o600 });
+    const childEnv = {
+      ...env,
+      OPENCODE_CONFIG: context.configPath,
+      OPENCODE_CONFIG_DIR: opencodeConfigDir(env),
+    };
     const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, reject) => {
       const child = spawn(process.execPath, [helperPath, inputPath], {
         cwd: context.projectDir,
-        env,
+        env: childEnv,
         shell: false,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
