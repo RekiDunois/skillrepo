@@ -90,14 +90,16 @@ test('registered resource resolver derives package repo root from .apm agent reg
   const configDir = join(root, 'opencode');
   const repo = join(root, 'package-agent-repo');
   const agents = join(repo, '.apm', 'agents');
+  const source = join(agents, 'reviewer.agent.md');
   const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
 
   try {
     await mkdir(agents, { recursive: true });
     await mkdir(join(configDir, 'agents'), { recursive: true });
     await writeFile(join(repo, 'apm.yml'), 'name: package-agent-repo\n', 'utf8');
+    await writeFile(source, '---\ndescription: package agent\nmode: subagent\n---\n', 'utf8');
     await writeFile(join(configDir, 'opencode.jsonc'), '{}\n', 'utf8');
-    await symlink(agents, join(configDir, 'agents', 'package-agent-repo'), 'dir');
+    await symlink(source, join(configDir, 'agents', 'reviewer.md'));
 
     assert.equal(await resolveRegisteredRepo('package-agent-repo', env), repo);
   } finally {

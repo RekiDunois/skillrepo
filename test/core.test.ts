@@ -39,8 +39,8 @@ async function makePackageRepo(root: string, name: string, skillId: string, agen
     'utf8',
   );
   await writeFile(
-    join(repo, '.apm', 'agents', `${agentName}.md`),
-    `---\nname: ${agentName}\ndescription: package test\nmode: subagent\n---\n`,
+    join(repo, '.apm', 'agents', `${agentName}.agent.md`),
+    '---\ndescription: package test\nmode: subagent\n---\n',
     'utf8',
   );
   return repo;
@@ -99,17 +99,22 @@ test('package layout registers and unregisters its original .apm sources', async
       assert.equal(inventory.layout, 'apm');
       assert.equal(inventory.skillsDir, join(repo, '.apm', 'skills'));
       assert.equal(inventory.agentsDir, join(repo, '.apm', 'agents'));
+      assert.deepEqual(inventory.agentNames, ['package-agent']);
+      assert.deepEqual(inventory.agentSources, [{
+        name: 'package-agent',
+        sourcePath: join(repo, '.apm', 'agents', 'package-agent.agent.md'),
+      }]);
 
       const result = await registerRepo(repo);
       assert.equal(result.skillPath, join(repo, '.apm', 'skills'));
       assert.deepEqual(JSON.parse(await readFile(join(configDir, 'opencode.jsonc'), 'utf8')).skills.paths, [
         join(repo, '.apm', 'skills'),
       ]);
-      assert.equal(await readlink(join(configDir, 'agents', 'package-repo')), join(repo, '.apm', 'agents'));
+      assert.equal(await readlink(join(configDir, 'agents', 'package-agent.md')), join(repo, '.apm', 'agents', 'package-agent.agent.md'));
 
       await unregisterRepo(repo);
       assert.deepEqual(JSON.parse(await readFile(join(configDir, 'opencode.jsonc'), 'utf8')).skills.paths, []);
-      await assert.rejects(access(join(configDir, 'agents', 'package-repo')));
+      await assert.rejects(access(join(configDir, 'agents', 'package-agent.md')));
       assert.equal(await access(join(repo, '.apm', 'skills', 'package-skill', 'SKILL.md')).then(() => true), true);
     });
   } finally {

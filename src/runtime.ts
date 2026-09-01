@@ -1,4 +1,4 @@
-import { access, lstat, mkdtemp, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdtemp, readFile, readlink, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
@@ -74,6 +74,16 @@ async function directoryExists(path: string): Promise<boolean> {
   }
 }
 
+async function walkSymlinkPaths(root: string): Promise<string[]> {
+  const paths: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) paths.push(...await walkSymlinkPaths(path));
+    else if (entry.isSymbolicLink()) paths.push(path);
+  }
+  return paths;
+}
+
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
@@ -126,6 +136,22 @@ export async function resolveRegisteredRepo(
     }
   } catch {
     // No agent registration for this repo.
+  }
+
+  const agentRoot = join(opencodeConfigDir(env), 'agents');
+  if (await directoryExists(agentRoot)) {
+    for (const path of await walkSymlinkPaths(agentRoot)) {
+      let target: string;
+      try {
+        target = resolve(dirname(path), await readlink(path));
+      } catch {
+        continue;
+      }
+      if (!(await exists(target))) continue;
+      for (const root of await repoRootsFromSource(dirname(target))) {
+        if (repoIdFromPath(root) === repoId) candidates.add(root);
+      }
+    }
   }
 
   const configPath = opencodeConfigFile(env);

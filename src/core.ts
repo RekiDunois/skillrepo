@@ -1,6 +1,6 @@
 import { access, chmod, lstat, mkdir, readFile, readdir, readlink, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { constants, existsSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -9,6 +9,7 @@ import { parseFrontmatter } from './frontmatter.js';
 
 export type VerifyResult = { ok: boolean; command: string; stdout: string; stderr: string };
 export type RepoLayout = 'skillrepo' | 'apm';
+export type AgentSource = { name: string; sourcePath: string };
 export type RepoInventory = {
   repo: string;
   layout: RepoLayout;
@@ -16,6 +17,7 @@ export type RepoInventory = {
   agentsDir?: string;
   skillIds: string[];
   agentNames: string[];
+  agentSources: AgentSource[];
 };
 
 type RegistrationState = { skillsRegistered: boolean; agentsRegistered: boolean };
@@ -305,6 +307,10 @@ export function agentRegistrationPath(repoInput: string): string {
   return join(opencodeConfigDir(), 'agents', repoId(resolve(repoInput)));
 }
 
+function agentFileRegistrationPath(name: string): string {
+  return join(opencodeConfigDir(), 'agents', `${name}.md`);
+}
+
 function frontmatter(text: string): Record<string, unknown> {
   return parseFrontmatter(text).data;
 }
@@ -317,6 +323,16 @@ async function walkFiles(root: string): Promise<string[]> {
     else if (entry.isFile()) files.push(path);
   }
   return files;
+}
+
+async function walkDirectoryPaths(root: string): Promise<string[]> {
+  const paths: string[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) paths.push(...await walkDirectoryPaths(path));
+    else if (entry.isSymbolicLink()) paths.push(path);
+  }
+  return paths;
 }
 
 async function collectSkillIds(skillsDir: string, strictDuplicates: boolean): Promise<string[]> {
@@ -377,6 +393,32 @@ async function collectAgentNames(
   return { names, issues };
 }
 
+async function collectApmAgentSources(agentsDir: string): Promise<{ sources: AgentSource[]; issues: string[] }> {
+  if (!(await exists(agentsDir))) return { sources: [], issues: [] };
+
+  const sources: AgentSource[] = [];
+  const issues: string[] = [];
+  const seen = new Map<string, string>();
+  for (const path of await walkFiles(agentsDir)) {
+    if (!path.endsWith('.agent.md')) continue;
+    const name = relative(agentsDir, path).slice(0, -'.agent.md'.length).split(sep).join('/');
+    if (!name) continue;
+
+    const meta = frontmatter(await readFile(path, 'utf8'));
+    if (Object.prototype.hasOwnProperty.call(meta, 'name') && typeof meta.name !== 'string') {
+      throw new Error(`${path}: agent frontmatter name must be a string`);
+    }
+    const previous = seen.get(name);
+    if (previous) {
+      issues.push(`${path}: duplicate agent name '${name}' (also ${previous})`);
+      continue;
+    }
+    seen.set(name, path);
+    sources.push({ name, sourcePath: path });
+  }
+  return { sources, issues };
+}
+
 export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
   const repo = resolve(repoInput);
   const repoStat = await tryLstat(repo);
@@ -416,12 +458,24 @@ export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
   if (hasAgents && (!agentsStat!.isDirectory() || agentsStat!.isSymbolicLink())) throw new Error(`agents path is not a real directory: ${agents}`);
 
   const skillIds = hasSkills ? await collectSkillIds(skills, true) : [];
-  const agentResult = hasAgents
-    ? await collectAgentNames(agents, true)
-    : { names: [], issues: [] as string[] };
+  let agentNames: string[] = [];
+  let agentSources: AgentSource[] = [];
+  let agentIssues: string[] = [];
+  if (hasAgents) {
+    if (layout.layout === 'apm') {
+      const result = await collectApmAgentSources(agents);
+      agentSources = result.sources;
+      agentNames = result.sources.map(source => source.name);
+      agentIssues = result.issues;
+    } else {
+      const result = await collectAgentNames(agents, true);
+      agentNames = result.names;
+      agentIssues = result.issues;
+    }
+  }
 
-  if (agentResult.issues.length) {
-    throw new Error(`Agent validation failed:\n${agentResult.issues.join('\n')}`);
+  if (agentIssues.length) {
+    throw new Error(`Agent validation failed:\n${agentIssues.join('\n')}`);
   }
 
   return {
@@ -430,7 +484,8 @@ export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
     skillsDir: hasSkills ? skills : undefined,
     agentsDir: hasAgents ? agents : undefined,
     skillIds,
-    agentNames: agentResult.names,
+    agentNames,
+    agentSources,
   };
 }
 
@@ -453,6 +508,13 @@ function intersect(left: string[], right: string[]): string[] {
   return left.filter(value => rightSet.has(value));
 }
 
+function agentNameFromFilePath(path: string): string {
+  const file = basename(path);
+  if (file.endsWith('.agent.md')) return file.slice(0, -'.agent.md'.length);
+  if (file.endsWith('.md')) return file.slice(0, -'.md'.length);
+  return '';
+}
+
 async function registrationState(inventory: RepoInventory): Promise<RegistrationState> {
   let skillsRegistered = !inventory.skillsDir;
   if (inventory.skillsDir) {
@@ -464,7 +526,17 @@ async function registrationState(inventory: RepoInventory): Promise<Registration
   }
 
   let agentsRegistered = !inventory.agentsDir;
-  if (inventory.agentsDir) {
+  if (inventory.agentsDir && inventory.layout === 'apm') {
+    agentsRegistered = true;
+    for (const source of inventory.agentSources) {
+      const link = agentFileRegistrationPath(source.name);
+      const linkStat = await tryLstat(link);
+      if (!linkStat?.isSymbolicLink() || resolve(dirname(link), await readlink(link)) !== source.sourcePath) {
+        agentsRegistered = false;
+        break;
+      }
+    }
+  } else if (inventory.agentsDir) {
     const link = join(opencodeConfigDir(), 'agents', repoId(inventory.repo));
     if (await lexists(link)) {
       const linkStat = await lstat(link);
@@ -502,7 +574,7 @@ async function staticCollisionIssues(inventory: RepoInventory): Promise<string[]
     const agentRoot = join(opencodeConfigDir(), 'agents');
     const candidateLink = join(agentRoot, repoId(inventory.repo));
 
-    if (await lexists(candidateLink)) {
+    if (inventory.layout === 'skillrepo' && await lexists(candidateLink)) {
       const linkStat = await lstat(candidateLink);
       if (!linkStat.isSymbolicLink()) {
         issues.push(`Agent registration path exists and is not a symlink: ${candidateLink}`);
@@ -514,9 +586,24 @@ async function staticCollisionIssues(inventory: RepoInventory): Promise<string[]
       }
     }
 
+    if (inventory.layout === 'apm') {
+      for (const source of inventory.agentSources) {
+        const path = agentFileRegistrationPath(source.name);
+        if (!(await lexists(path))) continue;
+        const linkStat = await lstat(path);
+        if (!linkStat.isSymbolicLink()) {
+          issues.push(`Agent registration path exists and is not a symlink: ${path}`);
+          continue;
+        }
+        const target = resolve(dirname(path), await readlink(path));
+        if (target !== source.sourcePath) issues.push(`Agent symlink collision: ${path} -> ${target}`);
+      }
+    }
+
     if (inventory.agentNames.length && await directoryExists(agentRoot)) {
       for (const entry of await readdir(agentRoot, { withFileTypes: true })) {
         const path = join(agentRoot, entry.name);
+        if (inventory.layout === 'apm' && inventory.agentSources.some(source => path === agentFileRegistrationPath(source.name))) continue;
         let sourceDir: string | null = null;
 
         if (entry.isSymbolicLink()) {
@@ -526,8 +613,7 @@ async function staticCollisionIssues(inventory: RepoInventory): Promise<string[]
         } else if (entry.isDirectory()) {
           sourceDir = path;
         } else if (entry.isFile() && entry.name.endsWith('.md')) {
-          const meta = frontmatter(await readFile(path, 'utf8'));
-          const name = typeof meta.name === 'string' ? meta.name.trim() : '';
+          const name = agentNameFromFilePath(path);
           if (name && inventory.agentNames.includes(name)) {
             issues.push(`Agent name collision '${name}' with ${path}`);
           }
@@ -667,7 +753,7 @@ export async function assertNoConfiguredIdentifierCollisions(
 
 export async function registerRepo(
   repoInput: string,
-): Promise<{ repo: string; skillPath?: string; agentLink?: string }> {
+): Promise<{ repo: string; skillPath?: string; agentLink?: string; agentLinks?: string[] }> {
   const inventory = await inspectRepo(repoInput);
   const collisions = await staticCollisionIssues(inventory);
   if (collisions.length) throw new Error(`Registration blocked:\n${collisions.join('\n')}`);
@@ -683,16 +769,31 @@ export async function registerRepo(
   }
 
   let agentLink: string | undefined;
+  const agentLinks: string[] = [];
   if (inventory.agentsDir) {
     const targetDir = join(opencodeConfigDir(), 'agents');
     await mkdir(targetDir, { recursive: true });
-    agentLink = join(targetDir, repoId(inventory.repo));
-    if (!(await lexists(agentLink))) {
-      await symlink(inventory.agentsDir, agentLink, 'dir');
+    if (inventory.layout === 'apm') {
+      for (const source of inventory.agentSources) {
+        const path = agentFileRegistrationPath(source.name);
+        await mkdir(dirname(path), { recursive: true });
+        if (!(await lexists(path))) await symlink(source.sourcePath, path);
+        agentLinks.push(path);
+      }
+    } else {
+      agentLink = join(targetDir, repoId(inventory.repo));
+      if (!(await lexists(agentLink))) {
+        await symlink(inventory.agentsDir, agentLink, 'dir');
+      }
     }
   }
 
-  return { repo: inventory.repo, skillPath: inventory.skillsDir, agentLink };
+  return {
+    repo: inventory.repo,
+    skillPath: inventory.skillsDir,
+    agentLink,
+    agentLinks: agentLinks.length ? agentLinks : undefined,
+  };
 }
 
 export async function unregisterRepo(repoInput: string): Promise<void> {
@@ -713,10 +814,21 @@ export async function unregisterRepo(repoInput: string): Promise<void> {
       throw new Error(`Refusing to remove non-symlink registration path: ${link}`);
     }
     const target = resolve(dirname(link), await readlink(link));
-    if (!agentSources.includes(target)) {
+    if (!agentSources.includes(target) && !pathIsWithin(join(repo, '.apm', 'agents'), target)) {
       throw new Error(`Refusing to remove symlink owned by another target: ${link} -> ${target}`);
     }
     await unlink(link);
+  }
+
+  const packageAgents = join(repo, '.apm', 'agents');
+  const agentRoot = join(opencodeConfigDir(), 'agents');
+  if (await directoryExists(agentRoot)) {
+    for (const path of await walkDirectoryPaths(agentRoot)) {
+      const linkStat = await lstat(path);
+      if (!linkStat.isSymbolicLink()) continue;
+      const target = resolve(dirname(path), await readlink(path));
+      if (pathIsWithin(packageAgents, target)) await unlink(path);
+    }
   }
 }
 
@@ -1021,16 +1133,18 @@ async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: strin
           continue;
         }
         if (!entry.name.endsWith('.md')) continue;
+        registeredSources += 1;
         const meta = frontmatter(await readFile(path, 'utf8'));
-        const name = typeof meta.name === 'string' ? meta.name.trim() : '';
+        const name = agentNameFromFilePath(path) || (typeof meta.name === 'string' ? meta.name.trim() : '');
         if (!name) continue;
         const previous = seenAgents.get(name);
         if (previous && previous !== path) issues.push(`Duplicate agent name '${name}': ${previous} and ${path}`);
         else seenAgents.set(name, path);
       } else if (entry.isFile() && entry.name.endsWith('.md')) {
         const meta = frontmatter(await readFile(path, 'utf8'));
-        const name = typeof meta.name === 'string' ? meta.name.trim() : '';
+        const name = agentNameFromFilePath(path) || (typeof meta.name === 'string' ? meta.name.trim() : '');
         if (!name) continue;
+        registeredSources += 1;
         const previous = seenAgents.get(name);
         if (previous && previous !== path) issues.push(`Duplicate agent name '${name}': ${previous} and ${path}`);
         else seenAgents.set(name, path);

@@ -33,7 +33,7 @@ repo/
     └── agents/
 ```
 
-`register` adds the selected source directory (`repo/skills` or `repo/.apm/skills`) to OpenCode's global `skills` sources and creates one repo-level directory symlink under OpenCode's global `agents/` directory. Agent Markdown files must declare a stable frontmatter `name`. The source directories are linked directly; `skillrepo` never copies their contents.
+`register` adds the selected source directory (`repo/skills` or `repo/.apm/skills`) to OpenCode's global `skills` sources. Legacy agents use one repo-level directory symlink under OpenCode's global `agents/` directory and must declare a stable frontmatter `name`. APM agents use canonical `.agent.md` files and get per-file `<name>.md` symlinks under OpenCode's global `agents/` directory; the agent name comes from the source filename. All links point directly at the original source, so `skillrepo` never copies their contents.
 
 Only one supported layout may be present in a repository. If both layouts contain a `skills` or `agents` source directory, inspection fails closed rather than guessing.
 
