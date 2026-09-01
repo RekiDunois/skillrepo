@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -248,6 +248,15 @@ async function makeInjectedConfig(context, root, baseEnv, mockBaseUrl) {
   await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
   const originalAgents = join(dirname(originalPath), 'agents')
   try { await stat(originalAgents); await symlink(originalAgents, join(configDir, 'agents'), 'dir') } catch {}
+  const originalPlugins = join(dirname(originalPath), 'plugins')
+  try { await stat(originalPlugins); await symlink(originalPlugins, join(configDir, 'plugins'), 'dir') } catch {}
+  for (const entry of await readdir(dirname(originalPath), { withFileTypes: true })) {
+    if (entry.name === basename(originalPath) || entry.name === 'opencode.json' || entry.name === 'opencode.jsonc'
+      || entry.name === 'agents' || entry.name === 'plugins') continue
+    try {
+      await symlink(join(dirname(originalPath), entry.name), join(configDir, entry.name), entry.isDirectory() ? 'dir' : 'file')
+    } catch {}
+  }
   return { path, configDir, originalPath, config }
 }
 

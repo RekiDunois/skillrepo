@@ -49,3 +49,10 @@ test("runtime verification uses serve instead of opening the default browser", (
   assert.match(migrationRuntimeScript, /\[executable, 'serve',/);
   assert.doesNotMatch(migrationRuntimeScript, /\[executable, 'web',/);
 });
+
+test("migration runtime verification preserves the user global plugin directory", () => {
+  assert.match(
+    migrationRuntimeScript,
+    /symlink\(originalPlugins,\s*join\(configDir, ['"]plugins['"]\)/,
+  );
+});
