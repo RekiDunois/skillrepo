@@ -2,6 +2,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   readlink,
@@ -13,6 +14,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { constants } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { parseFrontmatter } from './frontmatter.js';
@@ -99,6 +101,7 @@ type JournalOperation = MoveOperation & {
   targetFingerprint?: string;
   targetIdentity?: PathIdentity;
   stagedFingerprint?: string;
+  stagedIdentity?: PathIdentity;
   compatibilityPaths: string[];
   compatibilityIdentities: Record<string, PathIdentity>;
   fileCompatibilityTarget?: string;
@@ -1094,9 +1097,20 @@ async function ensureStableAgentName(
     if (typeof meta.name === 'string' && meta.name.trim()) return;
   }
 
-  const backupPath = join(journal.journalPath, '..', `${operation.operationId}.original`);
-  await writeFile(backupPath, text, { encoding: 'utf8', mode: 0o600 });
+  const backupPath = join(journal.journalPath, '..', `${journal.transactionId}.${operation.operationId}.original`);
   operation.generatedAgentBackupPath = resolve(backupPath);
+  await persistJournal(journal);
+  const backupHandle = await open(
+    backupPath,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+    0o600,
+  );
+  try {
+    await backupHandle.writeFile(text, { encoding: 'utf8' });
+    await backupHandle.sync();
+  } finally {
+    await backupHandle.close();
+  }
   const pathStat = await lstat(path);
   operation.generatedAgentOriginalFingerprint = fingerprintBuffer(`file\0${pathStat.mode & 0o7777}\0`, Buffer.from(text, 'utf8'));
   await persistJournal(journal);
@@ -1222,6 +1236,8 @@ async function prepareOperations(journal: MigrationJournal): Promise<void> {
     await rename(operation.source, operation.stagePath);
     operation.state = 'staged';
     operation.stagedFingerprint = await fingerprintPath(operation.stagePath);
+    operation.stagedIdentity = await pathIdentity(operation.stagePath) ?? undefined;
+    if (!operation.stagedIdentity) throw new Error(`Staged migration content disappeared: ${operation.stagePath}`);
     await persistJournal(journal);
 
     if (operation.kind === 'agent' && operation.target.endsWith('.md')) {
@@ -1804,6 +1820,30 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
       ]);
       const unknown = entries.filter(name => !ownedEntries.has(name));
       if (unknown.length) return [`Unknown files remain in transaction staging: ${unknown.join(', ')}`];
+      for (const operation of journal.operations) {
+        if (await lexists(operation.stagePath)) {
+          if (!(await stagedContentIsOwned(operation))) {
+            return [`Staging content was modified outside transaction: ${operation.stagePath}`];
+          }
+          if (operation.stagedIdentity && !sameIdentity(await pathIdentity(operation.stagePath), operation.stagedIdentity)) {
+            return [`Staging content was recreated outside transaction: ${operation.stagePath}`];
+          }
+        }
+      }
+      for (const operation of journal.operations) {
+        if (!operation.skillShimStagePath || !(await lexists(operation.skillShimStagePath))) continue;
+        const marker = join(operation.skillShimStagePath, COMPAT_MARKER);
+        if (await lexists(marker)) {
+          const metadata = await readJson(marker);
+          if (metadata.transactionId !== journal.transactionId
+            || metadata.operationId !== operation.operationId
+            || metadata.target !== operation.target) {
+            return [`Skill compatibility staging owner mismatch: ${operation.skillShimStagePath}`];
+          }
+        } else if ((await readdir(operation.skillShimStagePath)).length > 0) {
+          return [`Unknown files remain in skill compatibility staging: ${operation.skillShimStagePath}`];
+        }
+      }
       await rm(journal.stagingRoot, { recursive: true, force: true });
     }
 
@@ -1907,6 +1947,7 @@ async function rollbackTransaction(journal: MigrationJournal): Promise<{ complet
   journal.phase = 'rollback';
   journal.status = 'rollback-in-progress';
   await persistJournal(journal);
+  crashAfter('rollback-started');
 
   try {
     await recoverCreatingDirectories(journal);

@@ -176,3 +176,47 @@ test('migration rollback resumes after rollback itself is killed', { skip: proce
     });
   }
 });
+
+test('rollback preserves staging content modified after rollback begins', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'directory-published');
+    await runCrash(f, 'rollback-started', true);
+
+    const names = await readdir(join(f.sourceRoot, '.skillrepo-migrations'));
+    const journalPath = join(f.sourceRoot, '.skillrepo-migrations', names.find(name => name.endsWith('.json'))!);
+    const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
+      operations: Array<{ source: string; stagePath: string }>;
+    };
+    const operation = journal.operations.find(item => item.source.endsWith(`${join('agents', 'helper.py')}`))!;
+    await writeFile(operation.stagePath, 'external edit\n', 'utf8');
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-incomplete/,
+      );
+    });
+    assert.equal(await readFile(operation.stagePath, 'utf8'), 'external edit\n');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration never follows a pre-existing agent backup symlink', async () => {
+  const f = await fixture();
+  const journalDir = join(f.sourceRoot, '.skillrepo-migrations');
+  const outside = join(f.root, 'outside.txt');
+  try {
+    await mkdir(journalDir, { recursive: true });
+    await writeFile(outside, 'sentinel\n', 'utf8');
+    await symlink(outside, join(journalDir, 'op-0002.original'));
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, verify: false });
+    });
+    assert.equal(await readFile(outside, 'utf8'), 'sentinel\n');
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
