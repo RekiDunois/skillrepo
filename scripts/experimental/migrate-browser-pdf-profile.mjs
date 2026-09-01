@@ -8,6 +8,7 @@ import {
   readFile,
   readdir,
   readlink,
+  realpath,
   rm,
   stat,
 } from 'node:fs/promises';
@@ -37,6 +38,7 @@ Defaults:
 
 Behavior:
   - dry-run by default
+  - accepts a symlinked source root, but resolves it to the real profile directory before copying
   - refuses to overwrite an existing target
   - refuses execution when a live process appears to be using source/target profile
   - also checks Chrome SingletonLock when it contains a live PID
@@ -102,7 +104,7 @@ function isPathInside(child, parent) {
 function processLinesUsing(paths) {
   const ps = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf8' });
   if (ps.error || ps.status !== 0) return { available: false, lines: [] };
-  const normalized = paths.map(path => resolve(path));
+  const normalized = [...new Set(paths.map(path => resolve(path)))];
   const lines = ps.stdout.split(/\r?\n/).filter(Boolean).filter(line => {
     const match = line.match(/^\s*(\d+)\s+(.*)$/);
     if (!match) return false;
@@ -244,22 +246,26 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) return usage();
 
-  const source = resolve(expandHome(args.source || '~/.config/opencode/skill/chrome-devtools/chrome-profile'));
+  const requestedSource = resolve(expandHome(args.source || '~/.config/opencode/skill/chrome-devtools/chrome-profile'));
+  const source = await realpath(requestedSource).catch(error => {
+    throw new Error(`Source profile is not readable: ${requestedSource}: ${error.message}`);
+  });
   const target = resolve(expandHome(args.target || join(defaultDataHome(), 'browser-pdf-tools', 'chrome-profile')));
 
   const sourceInfo = await stat(source).catch(error => {
-    throw new Error(`Source profile is not readable: ${source}: ${error.message}`);
+    throw new Error(`Resolved source profile is not readable: ${source}: ${error.message}`);
   });
-  if (!sourceInfo.isDirectory()) throw new Error(`Source profile is not a directory: ${source}`);
+  if (!sourceInfo.isDirectory()) throw new Error(`Resolved source profile is not a directory: ${source}`);
   if (source === target) throw new Error('Source and target profile paths are identical');
   if (isPathInside(target, source)) throw new Error(`Target must not be inside source: ${target}`);
   if (isPathInside(source, target)) throw new Error(`Source must not be inside target: ${source}`);
   if (await exists(target)) throw new Error(`Target already exists; refusing to overwrite: ${target}`);
 
-  const processes = processLinesUsing([source, target]);
+  const processes = processLinesUsing([requestedSource, source, target]);
   const lock = await singletonLockStatus(source);
 
-  console.log(`SOURCE: ${source}`);
+  console.log(`SOURCE: ${requestedSource}`);
+  if (source !== requestedSource) console.log(`SOURCE TARGET: ${source}`);
   console.log(`TARGET: ${target}`);
   console.log(`MODE: ${args.execute ? 'EXECUTE' : 'DRY-RUN'}`);
   console.log('SOURCE WILL BE DELETED: NO');
@@ -296,8 +302,8 @@ async function main() {
     targetCreated = true;
 
     const targetInfo = await lstat(target);
-    await chmod(target, sourceInfo.mode & 0o7777).catch(() => {});
     if (!targetInfo.isDirectory()) throw new Error(`Copied target is not a directory: ${target}`);
+    await chmod(target, sourceInfo.mode & 0o7777).catch(() => {});
 
     console.log('Verifying copied profile...');
     const targetInventory = await inventory(target);
@@ -309,7 +315,7 @@ async function main() {
     }
 
     console.log('\nCOPY VERIFIED: PASS');
-    console.log('SOURCE PROFILE: preserved unchanged');
+    console.log(`SOURCE PROFILE: preserved unchanged (${requestedSource})`);
     console.log(`EXTERNAL PROFILE READY: ${target}`);
     console.log('\nNext: run verify-browser-pdf-live-state.mjs. It should predict the external profile, then run the same skill_mcp/browser/PDF smoke tests.');
   } catch (error) {
