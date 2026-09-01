@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -43,7 +43,7 @@ test('registered resource resolver derives repo from OpenCode skill registration
     await chmod(script, 0o755);
 
     assert.equal(await resolveRegisteredRepo('runtime-repo', env), repo);
-    assert.equal(await resolveRegisteredResource('runtime-repo', 'bin/fixture.sh', env), script);
+    assert.equal(await resolveRegisteredResource('runtime-repo', 'bin/fixture.sh', env), await realpath(script));
     await assert.rejects(
       resolveRegisteredResource('runtime-repo', '../outside.sh', env),
       /escapes registered repo/,

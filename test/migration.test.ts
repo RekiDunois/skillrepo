@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, readFile, readlink, readdir, rm, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { applyMigration } from '../src/migration.js';
 
 async function withConfigDir<T>(configDir: string, fn: () => Promise<T>): Promise<T> {
@@ -146,6 +146,36 @@ test('migration mechanically moves content, keeps runtime compatibility, and reg
 
       const config = await readFile(join(f.sourceRoot, 'opencode.jsonc'), 'utf8');
       assert.match(config, /demo-repo/);
+      const journal = JSON.parse(await readFile(result.journalPath!, 'utf8')) as {
+        config: { originalText?: string };
+        prospectiveConfigText: string;
+        operations: Array<{ generatedAgentBackupPath?: string }>;
+      };
+      assert.equal(journal.config.originalText, undefined);
+      assert.equal(journal.prospectiveConfigText, '');
+      assert.equal(journal.operations.some(operation => operation.generatedAgentBackupPath), false);
+      assert.equal((await lstat(result.journalPath!)).mode & 0o077, 0);
+      assert.equal((await lstat(join(f.sourceRoot, '.skillrepo-migrations'))).mode & 0o777, 0o700);
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a committed journal does not block a later revision of the same plan', async () => {
+  const f = await fixture();
+  try {
+    await withConfigDir(f.sourceRoot, async () => {
+      await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, verify: false });
+      await writeFile(f.planPath, `${JSON.stringify({
+        schemaVersion: 1,
+        generatedFrom: { sourceRoot: f.sourceRoot },
+        repositories: [{ id: 'held-repo', action: 'CREATE_AND_MOVE', skills: ['held'], agents: [], libs: [] }],
+      }, null, 2)}\n`, 'utf8');
+
+      const result = await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, verify: false });
+      assert.equal(result.status, 'committed');
+      await access(join(f.targetRoot, 'held-repo', 'skills', 'held', 'SKILL.md'));
     });
   } finally {
     await rm(f.root, { recursive: true, force: true });
@@ -244,6 +274,220 @@ test('migration resume recognizes skillrepo-produced moved state and re-register
       );
     });
   } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration verification failure rolls back the complete batch and records rollback-complete', async () => {
+  const f = await fixture();
+  const binDir = join(f.root, 'bin');
+  const oldPath = process.env.PATH;
+  try {
+    await mkdir(binDir, { recursive: true });
+    const opencode = join(binDir, 'opencode');
+    await writeFile(opencode, '#!/usr/bin/env sh\nprintf "not-migrated\\n"\nexit 0\n', 'utf8');
+    await chmod(opencode, 0o755);
+
+    await withConfigDir(f.sourceRoot, async () => {
+      process.env.PATH = `${binDir}${delimiter}${oldPath ?? ''}`;
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot }),
+        /rollback-complete/,
+      );
+
+      await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
+      await access(join(f.sourceRoot, 'agents', 'worker.md'));
+      await access(join(f.sourceRoot, 'agents', 'agent-helper.py'));
+      await access(join(f.sourceRoot, 'lib', 'shared.js'));
+      await assert.rejects(access(join(f.targetRoot, 'demo-repo')));
+      await assert.rejects(access(join(f.sourceRoot, 'opencode.jsonc')));
+      await assert.rejects(readlink(join(f.sourceRoot, 'agents', 'agent-helper.py')));
+      await assert.rejects(readlink(join(f.sourceRoot, 'agents', 'demo-repo')));
+
+      const journals = await readdir(join(f.sourceRoot, '.skillrepo-migrations'));
+      assert.equal(journals.length, 1);
+      const journal = JSON.parse(await readFile(join(f.sourceRoot, '.skillrepo-migrations', journals[0]!), 'utf8')) as {
+        status: string;
+        phase: string;
+      };
+      assert.equal(journal.status, 'rollback-complete');
+      assert.equal(journal.phase, 'rolled-back');
+    });
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration verification failure rolls back repositories that completed earlier in the batch', async () => {
+  const f = await fixture();
+  const binDir = join(f.root, 'bin');
+  const oldPath = process.env.PATH;
+  try {
+    await mkdir(join(f.sourceRoot, 'skill', 'beta'), { recursive: true });
+    await writeFile(join(f.sourceRoot, 'skill', 'beta', 'SKILL.md'), '---\nname: beta\ndescription: beta\n---\n', 'utf8');
+    await writeFile(join(f.sourceRoot, 'agents', 'second.md'), '---\nname: second\ndescription: second\n---\n', 'utf8');
+    await writeFile(
+      f.planPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        generatedFrom: { sourceRoot: f.sourceRoot },
+        repositories: [
+          { id: 'demo-repo', action: 'CREATE_AND_MOVE', skills: ['alpha'], agents: ['worker.md', 'agent-helper.py'], libs: ['lib/shared.js'] },
+          { id: 'second-repo', action: 'CREATE_AND_MOVE', skills: ['beta'], agents: ['second.md'], libs: [] },
+        ],
+      }, null, 2)}\n`,
+      'utf8',
+    );
+    await mkdir(binDir, { recursive: true });
+    const opencode = join(binDir, 'opencode');
+    await writeFile(opencode, '#!/usr/bin/env sh\nprintf "not-migrated\\n"\nexit 0\n', 'utf8');
+    await chmod(opencode, 0o755);
+
+    await withConfigDir(f.sourceRoot, async () => {
+      process.env.PATH = `${binDir}${delimiter}${oldPath ?? ''}`;
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot }),
+        /rollback-complete/,
+      );
+      await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
+      await access(join(f.sourceRoot, 'skill', 'beta', 'SKILL.md'));
+      await access(join(f.sourceRoot, 'agents', 'worker.md'));
+      await access(join(f.sourceRoot, 'agents', 'second.md'));
+      await assert.rejects(access(join(f.targetRoot, 'demo-repo')));
+      await assert.rejects(access(join(f.targetRoot, 'second-repo')));
+      await assert.rejects(access(join(f.sourceRoot, 'opencode.jsonc')));
+    });
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration rejects duplicate derived agent names before creating a journal or moving files', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.sourceRoot, 'agents', 'other.md'), '---\nname: worker\ndescription: duplicate\n---\n', 'utf8');
+    await writeFile(
+      f.planPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        generatedFrom: { sourceRoot: f.sourceRoot },
+        repositories: [{
+          id: 'demo-repo',
+          action: 'CREATE_AND_MOVE',
+          skills: ['alpha'],
+          agents: ['worker.md', 'other.md'],
+          libs: ['lib/shared.js'],
+        }],
+      }, null, 2)}\n`,
+      'utf8',
+    );
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, verify: false }),
+        /Duplicate agent name 'worker'/,
+      );
+      await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
+      await access(join(f.sourceRoot, 'agents', 'worker.md'));
+      await access(join(f.sourceRoot, 'agents', 'other.md'));
+      await assert.rejects(access(join(f.targetRoot, 'demo-repo')));
+      await assert.rejects(access(join(f.sourceRoot, '.skillrepo-migrations')));
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration preflights nested skill frontmatter and preserves directory-derived root IDs', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'), '---\ndescription: no explicit name\n---\n', 'utf8');
+    await mkdir(join(f.sourceRoot, 'skill', 'alpha', 'nested'), { recursive: true });
+    await writeFile(join(f.sourceRoot, 'skill', 'alpha', 'nested', 'SKILL.md'), '---\nname: nested\ndescription: nested\n---\n', 'utf8');
+
+    await withConfigDir(f.sourceRoot, async () => {
+      const result = await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, verify: false });
+      assert.equal(result.status, 'committed');
+      assert.equal(result.moves[0]!.expectedSkillId, 'alpha');
+      await access(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md'));
+      await access(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'nested', 'SKILL.md'));
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration never overwrites an external config change during rollback', async () => {
+  const f = await fixture();
+  const binDir = join(f.root, 'bin');
+  const oldPath = process.env.PATH;
+  try {
+    await mkdir(binDir, { recursive: true });
+    const opencode = join(binDir, 'opencode');
+    await writeFile(
+      opencode,
+      '#!/usr/bin/env sh\nif [ "$1" = "debug" ]; then\n  printf "external edit\\n" > "$OPENCODE_CONFIG_DIR/opencode.jsonc"\n  exit 1\nfi\nexit 0\n',
+      'utf8',
+    );
+    await chmod(opencode, 0o755);
+
+    await withConfigDir(f.sourceRoot, async () => {
+      process.env.PATH = `${binDir}${delimiter}${oldPath ?? ''}`;
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot }),
+        /rollback-incomplete/,
+      );
+      assert.equal(await readFile(join(f.sourceRoot, 'opencode.jsonc'), 'utf8'), 'external edit\n');
+      await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
+      await assert.rejects(access(join(f.targetRoot, 'demo-repo')));
+    });
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration verifies the complete expected discovery set after registration', async () => {
+  const f = await fixture();
+  const binDir = join(f.root, 'bin');
+  const oldPath = process.env.PATH;
+  try {
+    await mkdir(binDir, { recursive: true });
+    const opencode = join(binDir, 'opencode');
+    await writeFile(
+      opencode,
+      `#!/usr/bin/env sh
+if [ "$1" = "debug" ] && [ "$2" = "skill" ]; then
+  if [ -f "$OPENCODE_CONFIG_DIR/opencode.jsonc" ] || [ -f "$OPENCODE_CONFIG_DIR/opencode.json" ]; then
+    printf '%s' '[{"name":"alpha"}]'
+  else
+    printf '%s' '[]'
+  fi
+fi
+if [ "$1" = "agent" ] && [ -L "$OPENCODE_CONFIG_DIR/agents/demo-repo" ]; then
+  printf "worker\\n"
+fi
+exit 0
+`,
+      'utf8',
+    );
+    await chmod(opencode, 0o755);
+
+    await withConfigDir(f.sourceRoot, async () => {
+      process.env.PATH = `${binDir}${delimiter}${oldPath ?? ''}`;
+      const result = await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot });
+      assert.equal(result.status, 'committed');
+      assert.equal(result.verification.every(item => item.ok), true);
+      assert.ok(result.verification.some(item => item.command === 'skillrepo migration targets'));
+    });
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
     await rm(f.root, { recursive: true, force: true });
   }
 });

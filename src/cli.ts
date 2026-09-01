@@ -231,6 +231,8 @@ async function main(): Promise<void> {
     });
 
     if (result.dryRun) {
+      if (result.transactionId) console.log(`Transaction: ${result.transactionId} (${result.status ?? 'unknown'}, phase ${result.phase ?? 'unknown'})`);
+      if (result.journalPath) console.log(`Transaction journal: ${result.journalPath}`);
       if (values.resume) {
         console.log(
           `Migration resume dry-run: ${result.moves.length} planned move(s), `
@@ -256,6 +258,8 @@ async function main(): Promise<void> {
     } else {
       console.log(`Migration applied: ${result.moves.length} move(s) into ${result.repositories.length} repo(s)`);
     }
+    if (result.transactionId) console.log(`Transaction: ${result.transactionId} (${result.status ?? 'unknown'}, phase ${result.phase ?? 'unknown'})`);
+    if (result.journalPath) console.log(`Transaction journal: ${result.journalPath}`);
     console.log(`Compatibility paths: ${result.compatibilityPaths.length}`);
     if (result.verification.length && !printVerification(result.verification)) {
       throw new Error('OpenCode verification failed after migration. Run skillrepo doctor for details.');

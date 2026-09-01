@@ -136,6 +136,10 @@ export async function applyMigrationIgnores(options: {
   for (const repo of audit.repositories) {
     if (!repo.exists) continue;
     const gitignorePath = join(repo.repoPath, '.gitignore');
+    const repoStat = await lstat(repo.repoPath);
+    if (!repoStat.isDirectory() || repoStat.isSymbolicLink()) {
+      throw new Error(`Migration ignore repository is not a real directory: ${repo.repoPath}`);
+    }
     const candidates = repo.ignoreCandidates
       .filter(candidate => isSafeAutoIgnorePattern(candidate.pattern))
       .sort((left, right) => comparePatterns(left.pattern, right.pattern));
@@ -158,6 +162,10 @@ export async function applyMigrationIgnores(options: {
     if (dryRun) continue;
 
     const text = newGitignoreText(patterns);
+    const beforePublish = await lstat(repo.repoPath);
+    if (!beforePublish.isDirectory() || beforePublish.isSymbolicLink()) {
+      throw new Error(`Migration ignore repository changed to a symlink: ${repo.repoPath}`);
+    }
     await publishNewGitignore(gitignorePath, text);
 
     try {

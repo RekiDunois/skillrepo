@@ -46,7 +46,10 @@ async function readOpenCodeSkills(env: NodeJS.ProcessEnv): Promise<string[]> {
   const errors: ParseError[] = [];
   const data = parse(text, errors, { allowTrailingComma: true }) as Record<string, unknown> | undefined;
   if (errors.length) throw new Error(`OpenCode config is not valid JSON/JSONC: ${configPath}`);
-  return stringArray(data?.skills);
+  const skills = data?.skills;
+  if (Array.isArray(skills)) return stringArray(skills);
+  if (skills && typeof skills === 'object') return stringArray((skills as Record<string, unknown>).paths);
+  return [];
 }
 
 function resolveConfigSource(source: string, configPath: string): string | null {
