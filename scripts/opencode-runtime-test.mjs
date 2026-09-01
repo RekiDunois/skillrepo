@@ -8,8 +8,9 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
-const SKILL_NAME = 'skillrepo-runtime-probe'
-const EXPECTED_RAW_SKILL_CONTENT_MARKER = 'SKILLREPO_RUNTIME_PROBE_MARKER_2026'
+const SKILL_NAME = 'skill-modification'
+const EXPECTED_RAW_SKILL_CONTENT_MARKER = 'SKILLREPO_SKILL_MODIFICATION_RUNTIME_MARKER_2026'
+const EXPECTED_SKILL_DESCRIPTION_FRAGMENT = 'Resolve the authoritative source path before editing'
 const SUCCESS_MARKER = 'SKILL_LOAD_OK'
 const DEFAULT_TIMEOUT_MS = 30_000
 
@@ -167,8 +168,16 @@ async function createMockProvider() {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     const serialized = JSON.stringify(body)
     const hasProbeMarker = serialized.includes(EXPECTED_RAW_SKILL_CONTENT_MARKER)
+    const hasSkillAdvertisement = serialized.includes(EXPECTED_SKILL_DESCRIPTION_FRAGMENT)
+    const hasModificationIntent = serialized.includes('修改 skill')
     const firstRequest = requests.length === 0
-    requests.push({ body, hasProbeMarker, firstRequest })
+    requests.push({ body, hasProbeMarker, hasSkillAdvertisement, hasModificationIntent, firstRequest })
+
+    if (firstRequest && (!hasSkillAdvertisement || !hasModificationIntent)) {
+      response.writeHead(500, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ error: { message: 'mock expected the skill modification advertisement and user intent' } }))
+      return
+    }
 
     if (!firstRequest && !hasProbeMarker) {
       response.writeHead(500, { 'content-type': 'application/json' })
@@ -286,11 +295,10 @@ async function createFixture(root, mockBaseUrl) {
   await mkdir(configDir, { recursive: true })
   await mkdir(homeDir, { recursive: true })
   await mkdir(projectDir, { recursive: true })
-  await writeFile(
-    join(sourceRoot, 'skill', SKILL_NAME, 'SKILL.md'),
-    `---\nname: ${SKILL_NAME}\ndescription: "Deterministic runtime verification probe"\n---\n\nUnique body marker: ${EXPECTED_RAW_SKILL_CONTENT_MARKER}\n`,
-    'utf8',
-  )
+  const skillSource = resolve(dirname(fileURLToPath(import.meta.url)), '../skills/skill-modification/SKILL.md')
+  const skillContent = await readFile(skillSource, 'utf8')
+  assert.match(skillContent, new RegExp(EXPECTED_RAW_SKILL_CONTENT_MARKER))
+  await writeFile(join(sourceRoot, 'skill', SKILL_NAME, 'SKILL.md'), skillContent, 'utf8')
   await writeProjectConfig(root, mockBaseUrl)
   await writeFile(
     planPath,
@@ -318,6 +326,14 @@ async function createFixture(root, mockBaseUrl) {
   const cli = resolve(dirname(fileURLToPath(import.meta.url)), '../dist/src/cli.js')
   await execFileAsync(process.execPath, [cli, 'migration', 'apply', '--plan', planPath, '--target-root', targetRoot, '--execute'], { env })
   await access(skillPath)
+
+  const debug = await execFileAsync(process.env.OPENCODE_BIN ?? 'opencode', ['debug', 'skill'], {
+    cwd: projectDir,
+    env,
+  })
+  const discovered = JSON.parse(debug.stdout)
+  assert.ok(Array.isArray(discovered))
+  assert.ok(discovered.some((skill) => skill?.name === SKILL_NAME), 'opencode debug skill did not discover skill-modification')
 
   const config = await readFile(join(configDir, 'opencode.jsonc'), 'utf8')
   assert.match(config, new RegExp(repoRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
@@ -378,7 +394,7 @@ async function executeSkillSession(context, runtime, baseUrl) {
       method: 'POST',
       body: JSON.stringify({
         model: { providerID: 'mock', modelID: 'mock-model' },
-        parts: [{ type: 'text', text: 'Run the skill tool now.' }],
+        parts: [{ type: 'text', text: '修改 skill，请先加载 skill-modification。' }],
       }),
     })
     const messages = await requestJson(baseUrl, `/session/${encodeURIComponent(session.id)}/message${query}`)
@@ -392,6 +408,8 @@ async function executeSkillSession(context, runtime, baseUrl) {
     assert.match(JSON.stringify(result), new RegExp(SUCCESS_MARKER))
     assert.equal(context.mock.requests.length, 2, `mock observed unexpected model request count: ${context.mock.requests.length}`)
     assert.equal(context.mock.requests[0].firstRequest, true)
+    assert.equal(context.mock.requests[0].hasSkillAdvertisement, true)
+    assert.equal(context.mock.requests[0].hasModificationIntent, true)
     assert.equal(context.mock.requests[0].toolCall.function.name, 'skill')
     assert.deepEqual(
       JSON.parse(context.mock.requests[0].toolCall.function.arguments),

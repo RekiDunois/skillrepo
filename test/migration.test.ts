@@ -114,6 +114,16 @@ test('migration mechanically moves content, keeps runtime compatibility, and reg
       });
       assert.equal(result.dryRun, false);
       assert.deepEqual(result.repositories, ['demo-repo']);
+      assert.equal(result.verified, false);
+      assert.deepEqual(result.skillMappings, [
+        {
+          operationId: 'op-0001',
+          repoId: 'demo-repo',
+          skillId: 'alpha',
+          sourceFile: join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'),
+          targetFile: join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md'),
+        },
+      ]);
 
       const repo = join(f.targetRoot, 'demo-repo');
       await access(join(repo, 'skills', 'alpha', 'SKILL.md'));
@@ -149,10 +159,20 @@ test('migration mechanically moves content, keeps runtime compatibility, and reg
       const journal = JSON.parse(await readFile(result.journalPath!, 'utf8')) as {
         config: { originalText?: string };
         prospectiveConfigText: string;
+        skillMappings: Array<{ operationId: string; skillId: string; sourceFile: string; targetFile: string }>;
         operations: Array<{ generatedAgentBackupPath?: string }>;
       };
       assert.equal(journal.config.originalText, undefined);
       assert.equal(journal.prospectiveConfigText, '');
+      assert.deepEqual(journal.skillMappings, [
+        {
+          operationId: 'op-0001',
+          repoId: 'demo-repo',
+          skillId: 'alpha',
+          sourceFile: join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'),
+          targetFile: join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md'),
+        },
+      ]);
       assert.equal(journal.operations.some(operation => operation.generatedAgentBackupPath), false);
       assert.equal((await lstat(result.journalPath!)).mode & 0o077, 0);
       assert.equal((await lstat(join(f.sourceRoot, '.skillrepo-migrations'))).mode & 0o777, 0o700);
@@ -413,6 +433,22 @@ test('migration preflights nested skill frontmatter and preserves directory-deri
       const result = await applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, verify: false });
       assert.equal(result.status, 'committed');
       assert.equal(result.moves[0]!.expectedSkillId, 'alpha');
+      assert.deepEqual(result.skillMappings, [
+        {
+          operationId: 'op-0001',
+          repoId: 'demo-repo',
+          skillId: 'alpha',
+          sourceFile: join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'),
+          targetFile: join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md'),
+        },
+        {
+          operationId: 'op-0001',
+          repoId: 'demo-repo',
+          skillId: 'nested',
+          sourceFile: join(f.sourceRoot, 'skill', 'alpha', 'nested', 'SKILL.md'),
+          targetFile: join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'nested', 'SKILL.md'),
+        },
+      ]);
       await access(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md'));
       await access(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'nested', 'SKILL.md'));
     });
@@ -491,6 +527,7 @@ exit 0
         }),
       });
       assert.equal(result.status, 'committed');
+      assert.equal(result.verified, true);
       assert.equal(result.verification.every(item => item.ok), true);
       assert.ok(result.verification.some(item => item.command === 'skillrepo migration targets'));
     });

@@ -67,6 +67,23 @@ skillrepo migration apply \
   --execute
 ```
 
+After a committed migration, `migration apply` prints a skill-modification
+handoff for each migrated root or nested `SKILL.md`. The handoff is generated
+from file-level transaction mappings, not from guessed directory names:
+
+```bash
+skillrepo migration apply \
+  --plan ./migration-plan.json \
+  --target-root ~/skill-repos \
+  --execute \
+  --template-out ./skill-modification-handoff.md
+```
+
+`--template-out` is opt-in and refuses to overwrite an existing file. A
+`--no-verify` migration may print only an `unverified` handoff; dry-runs,
+rollback states, and migrations without skills do not produce a successful
+skill handoff.
+
 The current schema consumes repositories whose action is `CREATE_AND_MOVE` and mechanically maps:
 
 ```text
@@ -177,3 +194,15 @@ node skills/skill-development-location/scripts/locate-resource.mjs \
 ```
 
 It also documents parallel work ownership, Conventional Commit rules, staged-diff checks, and the push/PR handoff.
+
+This repository also ships the `skill-modification` entry skill. Register this
+repository with OpenCode to make it discoverable:
+
+```bash
+skillrepo register /path/to/skillrepo
+```
+
+Then start a new OpenCode session and explicitly request `skill-modification`
+when a task changes an existing skill. The skill uses
+`skill-development-location` to resolve the authoritative source before any
+edit; it does not add custom `trigger` or `when` frontmatter fields.
