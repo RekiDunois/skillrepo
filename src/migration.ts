@@ -228,6 +228,20 @@ type MigrationJournal = {
   };
 };
 
+type LegacyMigrationJournal = {
+  schemaVersion: 1;
+  transactionId: string;
+  planPath: string;
+  planFingerprint: string;
+  sourceRoot: string;
+  targetRoot: string;
+  status: string;
+  operations: unknown[];
+  journalPath: string;
+};
+
+type LoadedMigrationJournal = MigrationJournal | LegacyMigrationJournal;
+
 type PreflightResult = {
   operations: MoveOperation[];
   repositories: string[];
@@ -2857,24 +2871,35 @@ async function inspectTargetGit(
   return Object.fromEntries(entries);
 }
 
-async function loadJournals(sourceRoot: string): Promise<MigrationJournal[]> {
+async function loadJournals(sourceRoot: string): Promise<LoadedMigrationJournal[]> {
   const directory = journalDirectory(sourceRoot);
   if (!(await lexists(directory))) return [];
   const directoryStat = await tryLstat(directory);
   if (!directoryStat?.isDirectory() || directoryStat.isSymbolicLink()) throw new Error(`Migration journal directory is not a real directory: ${directory}`);
 
-  const journals: MigrationJournal[] = [];
+  const journals: LoadedMigrationJournal[] = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     if (!entry.name.endsWith('.json')) continue;
     if (entry.isSymbolicLink()) throw new Error(`Migration journal entry is a symlink: ${join(directory, entry.name)}`);
     if (!entry.isFile()) throw new Error(`Migration journal entry is not a file: ${join(directory, entry.name)}`);
     const path = join(directory, entry.name);
     const value = await readJson(path);
+    if (value.schemaVersion === 1
+      && typeof value.transactionId === 'string'
+      && typeof value.planPath === 'string'
+      && typeof value.planFingerprint === 'string'
+      && typeof value.sourceRoot === 'string'
+      && typeof value.targetRoot === 'string'
+      && typeof value.status === 'string'
+      && Array.isArray(value.operations)) {
+      journals.push({ ...value, journalPath: path } as unknown as LegacyMigrationJournal);
+      continue;
+    }
     if (value.schemaVersion !== 2 || typeof value.transactionId !== 'string' || !Array.isArray(value.operations)
       || !Array.isArray(value.skillMappings) || !value.verification || typeof value.verification !== 'object') {
       throw new Error(`Unsupported or invalid migration journal: ${path}`);
     }
-    journals.push(value as unknown as MigrationJournal);
+    journals.push({ ...value, journalPath: path } as unknown as MigrationJournal);
   }
   return journals;
 }
@@ -2890,11 +2915,27 @@ async function matchingJournal(
   const related = journals.filter(journal => (
     journal.planPath === planPath && journal.sourceRoot === sourceRoot && journal.targetRoot === targetRoot
   ));
-  const changedPlan = related
+  const legacy = related.filter((journal): journal is LegacyMigrationJournal => journal.schemaVersion === 1);
+  const legacyNeedingRecovery = legacy.filter(journal => (
+    journal.status !== 'committed'
+      && journal.status !== 'rollback-complete'
+      && journal.status !== 'preflight-failed'
+  ));
+  if (legacyNeedingRecovery.length) {
+    const changedPlan = legacyNeedingRecovery.find(journal => journal.planFingerprint !== planFingerprint);
+    const journal = changedPlan ?? legacyNeedingRecovery[0]!;
+    throw new Error(
+      changedPlan
+        ? `Migration plan changed since legacy transaction ${journal.transactionId}; manual recovery required: ${journal.journalPath}`
+        : `Related legacy migration journal ${journal.journalPath} uses schema v1 and cannot be resumed automatically; manual recovery required`,
+    );
+  }
+  const current = related.filter((journal): journal is MigrationJournal => journal.schemaVersion === 2);
+  const changedPlan = current
     .filter(journalNeedsRecovery)
     .find(journal => journal.planFingerprint !== planFingerprint);
   if (changedPlan) throw new Error(`Migration plan changed since transaction ${changedPlan.transactionId}; refusing to resume or overwrite it`);
-  const matches = related
+  const matches = current
     .filter(journal => journal.status !== 'rollback-complete' && journal.status !== 'preflight-failed')
     .filter(journal => journalMatchesPlan(journal, planPath, planFingerprint, sourceRoot, targetRoot, operations));
   if (matches.length > 1) throw new Error(`Multiple migration journals match the same plan and roots; refusing to guess`);
