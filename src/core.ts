@@ -8,8 +8,10 @@ import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { parseFrontmatter } from './frontmatter.js';
 
 export type VerifyResult = { ok: boolean; command: string; stdout: string; stderr: string };
+export type RepoLayout = 'skillrepo' | 'apm';
 export type RepoInventory = {
   repo: string;
+  layout: RepoLayout;
   skillsDir?: string;
   agentsDir?: string;
   skillIds: string[];
@@ -380,14 +382,28 @@ export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
   const repoStat = await tryLstat(repo);
   if (!repoStat?.isDirectory() || repoStat.isSymbolicLink()) throw new Error(`Repo path is not a real directory: ${repo}`);
 
-  const skills = join(repo, 'skills');
-  const agents = join(repo, 'agents');
+  const candidates: Array<{ layout: RepoLayout; skills: string; agents: string; present: boolean }> = [
+    { layout: 'skillrepo', skills: join(repo, 'skills'), agents: join(repo, 'agents'), present: false },
+    { layout: 'apm', skills: join(repo, '.apm', 'skills'), agents: join(repo, '.apm', 'agents'), present: false },
+  ];
+  for (const candidate of candidates) {
+    candidate.present = Boolean(await tryLstat(candidate.skills) || await tryLstat(candidate.agents));
+  }
+
+  const activeLayouts = candidates.filter(candidate => candidate.present);
+  if (activeLayouts.length === 0) throw new Error(`Repo has neither skills/ nor agents/ (or .apm/skills nor .apm/agents): ${repo}`);
+  if (activeLayouts.length > 1) {
+    throw new Error(`Repo has multiple supported layouts: ${activeLayouts.map(candidate => candidate.layout).join(', ')}: ${repo}`);
+  }
+
+  const layout = activeLayouts[0]!;
+  const skills = layout.skills;
+  const agents = layout.agents;
   const skillsStat = await tryLstat(skills);
   const agentsStat = await tryLstat(agents);
   const hasSkills = Boolean(skillsStat);
   const hasAgents = Boolean(agentsStat);
 
-  if (!hasSkills && !hasAgents) throw new Error(`Repo has neither skills/ nor agents/: ${repo}`);
   if (hasSkills && (!skillsStat!.isDirectory() || skillsStat!.isSymbolicLink())) throw new Error(`skills path is not a real directory: ${skills}`);
   if (hasAgents && (!agentsStat!.isDirectory() || agentsStat!.isSymbolicLink())) throw new Error(`agents path is not a real directory: ${agents}`);
 
@@ -402,6 +418,7 @@ export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
 
   return {
     repo,
+    layout: layout.layout,
     skillsDir: hasSkills ? skills : undefined,
     agentsDir: hasAgents ? agents : undefined,
     skillIds,
@@ -672,11 +689,13 @@ export async function registerRepo(
 
 export async function unregisterRepo(repoInput: string): Promise<void> {
   const repo = resolve(repoInput);
-  const skills = join(repo, 'skills');
+  const skillSources = [join(repo, 'skills'), join(repo, '.apm', 'skills')];
+  const agentSources = [join(repo, 'agents'), join(repo, '.apm', 'agents')];
   const configPath = opencodeConfigFile();
 
   await updateSkills(configPath, current => current.filter(source => {
-    return resolveConfigSource(source, configPath) !== skills;
+    const resolved = resolveConfigSource(source, configPath);
+    return !resolved || !skillSources.includes(resolved);
   }));
 
   const link = join(opencodeConfigDir(), 'agents', repoId(repo));
@@ -686,7 +705,7 @@ export async function unregisterRepo(repoInput: string): Promise<void> {
       throw new Error(`Refusing to remove non-symlink registration path: ${link}`);
     }
     const target = resolve(dirname(link), await readlink(link));
-    if (target !== join(repo, 'agents')) {
+    if (!agentSources.includes(target)) {
       throw new Error(`Refusing to remove symlink owned by another target: ${link} -> ${target}`);
     }
     await unlink(link);

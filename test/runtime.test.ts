@@ -61,6 +61,48 @@ test('registered resource resolver derives repo from OpenCode skill registration
   }
 });
 
+test('registered resource resolver derives package repo root from .apm skill registration', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-runtime-package-'));
+  const configDir = join(root, 'opencode');
+  const repo = join(root, 'package-repo');
+  const skills = join(repo, '.apm', 'skills');
+  const script = join(repo, 'bin', 'fixture.sh');
+  const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+
+  try {
+    await mkdir(skills, { recursive: true });
+    await mkdir(join(repo, 'bin'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, 'opencode.jsonc'), `{"skills":[${JSON.stringify(skills)}]}\n`, 'utf8');
+    await writeFile(script, '#!/usr/bin/env bash\nprintf "package-runtime:%s\\n" "$1"\n', 'utf8');
+    await chmod(script, 0o755);
+
+    assert.equal(await resolveRegisteredRepo('package-repo', env), repo);
+    assert.equal(await resolveRegisteredResource('package-repo', 'bin/fixture.sh', env), await realpath(script));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('registered resource resolver derives package repo root from .apm agent registration', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-runtime-package-agent-'));
+  const configDir = join(root, 'opencode');
+  const repo = join(root, 'package-agent-repo');
+  const agents = join(repo, '.apm', 'agents');
+  const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+
+  try {
+    await mkdir(agents, { recursive: true });
+    await mkdir(join(configDir, 'agents'), { recursive: true });
+    await writeFile(join(configDir, 'opencode.jsonc'), '{}\n', 'utf8');
+    await symlink(agents, join(configDir, 'agents', 'package-agent-repo'), 'dir');
+
+    assert.equal(await resolveRegisteredRepo('package-agent-repo', env), repo);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('registered resource resolver can derive an agent-only repo without a second registry', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-runtime-agent-'));
   const configDir = join(root, 'opencode');

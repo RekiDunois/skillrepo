@@ -17,7 +17,7 @@ skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path
 skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]
 ```
 
-A registered repo follows this convention:
+A registered repo can use either the legacy layout or a standard package authoring layout:
 
 ```text
 repo/
@@ -25,7 +25,17 @@ repo/
 └── agents/
 ```
 
-`register` adds the absolute `repo/skills` path to OpenCode's global `skills` sources and creates one repo-level directory symlink under OpenCode's global `agents/` directory. Agent Markdown files must declare a stable frontmatter `name`.
+```text
+repo/
+├── apm.yml
+└── .apm/
+    ├── skills/
+    └── agents/
+```
+
+`register` adds the selected source directory (`repo/skills` or `repo/.apm/skills`) to OpenCode's global `skills` sources and creates one repo-level directory symlink under OpenCode's global `agents/` directory. Agent Markdown files must declare a stable frontmatter `name`. The source directories are linked directly; `skillrepo` never copies their contents.
+
+Only one supported layout may be present in a repository. If both layouts contain a `skills` or `agents` source directory, inspection fails closed rather than guessing.
 
 Registration and unregistration are intended to be idempotent. `unregister` only removes linkage owned by the requested repo; it never removes repo contents.
 
