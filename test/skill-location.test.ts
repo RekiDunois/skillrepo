@@ -131,6 +131,78 @@ test('preserves OpenCode V1 names and legacy agent roots', async () => {
   }
 });
 
+test('preserves nested OpenCode V1 agent IDs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-'));
+  const configDir = join(root, 'opencode');
+  const projectRoot = join(root, 'project');
+  const nestedAgent = join(projectRoot, '.opencode', 'agent', 'team', 'reviewer.md');
+  try {
+    await mkdir(dirname(nestedAgent), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(nestedAgent, '---\ndescription: nested V1 agent\nmode: subagent\n---\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), '{}\n', 'utf8');
+
+    const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+    const found = JSON.parse((await runLocator([
+      '--kind', 'agent',
+      '--name', 'team/reviewer',
+      '--project-root', projectRoot,
+    ], env)).stdout);
+    assert.equal(found.path, await realpath(nestedAgent));
+    assert.equal(found.id, 'team/reviewer');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('resolves OpenCode V1 relative skill paths from the project root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-'));
+  const configDir = join(root, 'opencode');
+  const projectRoot = join(root, 'project');
+  const skill = join(projectRoot, 'team-skills', 'configured', 'SKILL.md');
+  try {
+    await mkdir(dirname(skill), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(skill, '---\nname: configured\ndescription: V1 relative path\n---\n', 'utf8');
+    await writeFile(
+      join(configDir, 'opencode.jsonc'),
+      JSON.stringify({ skills: { paths: ['./team-skills'] } }),
+      'utf8',
+    );
+
+    const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+    const found = JSON.parse((await runLocator([
+      '--kind', 'skill',
+      '--name', 'configured',
+      '--project-root', projectRoot,
+    ], env)).stdout);
+    assert.equal(found.path, await realpath(skill));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('does not discover nested legacy V1 mode files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-'));
+  const configDir = join(root, 'opencode');
+  const projectRoot = join(root, 'project');
+  const nestedMode = join(configDir, 'mode', 'nested', 'planner.md');
+  try {
+    await mkdir(dirname(nestedMode), { recursive: true });
+    await mkdir(projectRoot, { recursive: true });
+    await writeFile(nestedMode, '---\ndescription: nested legacy mode\n---\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), '{}\n', 'utf8');
+
+    const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+    await assert.rejects(
+      () => runLocator(['--kind', 'agent', '--name', 'planner', '--project-root', projectRoot], env),
+      error => locatorFailure(error) && error.stderr.includes('resource not found'),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('uses an explicit config and reports missing resources', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skill-location-'));
   try {
