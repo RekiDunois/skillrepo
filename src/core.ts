@@ -142,17 +142,41 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
+function isSkillUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function configuredSkillPaths(data: Record<string, unknown>): string[] {
+  const value = data.skills;
+  if (Array.isArray(value)) return stringArray(value).filter(path => !isSkillUrl(path));
+  if (value && typeof value === 'object') {
+    return stringArray((value as Record<string, unknown>).paths);
+  }
+  return [];
+}
+
+function configuredSkillUrls(data: Record<string, unknown>): string[] {
+  const value = data.skills;
+  if (Array.isArray(value)) return stringArray(value).filter(isSkillUrl);
+  if (value && typeof value === 'object') {
+    return stringArray((value as Record<string, unknown>).urls);
+  }
+  return [];
+}
+
 async function updateSkills(configPath: string, updater: (skills: string[]) => string[]): Promise<void> {
   const snapshot = await readOpenCodeConfigSnapshot(configPath);
   const { data } = await readConfig(configPath);
-  const current = stringArray(data.skills);
+  const current = configuredSkillPaths(data);
+  const legacyArray = Array.isArray(data.skills);
+  const currentUrls = configuredSkillUrls(data);
   const next = updater(current);
 
-  if (current.length === next.length && current.every((value, index) => value === next[index])) return;
+  if (!legacyArray && current.length === next.length && current.every((value, index) => value === next[index])) return;
   if (!snapshot.existed && next.length === 0) return;
 
   const baseText = snapshot.existed ? snapshot.text : EMPTY_CONFIG_TEXT;
-  const edits = modify(baseText, ['skills'], next, {
+  const edits = modify(baseText, legacyArray ? ['skills'] : ['skills', 'paths'], legacyArray ? { paths: next, urls: currentUrls } : next, {
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
   });
   await writeOpenCodeConfigAtomically(snapshot, applyEdits(baseText, edits));
@@ -166,7 +190,10 @@ function configTextWithSkills(snapshot: OpenCodeConfigSnapshot, skills: string[]
     throw new Error(`OpenCode config is not valid JSON/JSONC: ${snapshot.path}`);
   }
 
-  const edits = modify(baseText, ['skills'], skills, {
+  const data = parsed as Record<string, unknown>;
+  const legacyArray = Array.isArray(data.skills);
+  const currentUrls = configuredSkillUrls(data);
+  const edits = modify(baseText, legacyArray ? ['skills'] : ['skills', 'paths'], legacyArray ? { paths: skills, urls: currentUrls } : skills, {
     formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
   });
   const nextText = applyEdits(baseText, edits);
@@ -187,7 +214,7 @@ export function prospectiveOpenCodeConfig(
     throw new Error(`OpenCode config is not valid JSON/JSONC: ${snapshot.path}`);
   }
 
-  const current = stringArray(data.skills);
+  const current = configuredSkillPaths(data);
   const next = [...current];
   const addedSkillSources: string[] = [];
   for (const source of skillSources) {
@@ -406,7 +433,7 @@ async function registrationState(inventory: RepoInventory): Promise<Registration
   if (inventory.skillsDir) {
     const configPath = opencodeConfigFile();
     const { data } = await readConfig(configPath);
-    skillsRegistered = stringArray(data.skills).some(source => {
+    skillsRegistered = configuredSkillPaths(data).some(source => {
       return resolveConfigSource(source, configPath) === inventory.skillsDir;
     });
   }
@@ -436,7 +463,7 @@ async function staticCollisionIssues(inventory: RepoInventory): Promise<string[]
 
   if (inventory.skillsDir && inventory.skillIds.length) {
     const { data } = await readConfig(configPath);
-    for (const source of stringArray(data.skills)) {
+    for (const source of configuredSkillPaths(data)) {
       const resolved = resolveConfigSource(source, configPath);
       if (!resolved || resolved === inventory.skillsDir || !(await directoryExists(resolved))) continue;
       const existingIds = await collectSkillIds(resolved, false);
@@ -808,7 +835,7 @@ export async function verifyMigrationDiscovery(
   try {
     const configPath = registrationSourceConfigPath();
     const { data } = await readConfig(configPath);
-    const configuredSources = stringArray(data.skills);
+    const configuredSources = configuredSkillPaths(data);
     const configuredById = new Map<string, string>();
 
     for (const source of configuredSources) {
@@ -894,7 +921,7 @@ async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: strin
     const { data } = await readConfig(configPath);
     const seenSkills = new Map<string, string>();
 
-    for (const source of stringArray(data.skills)) {
+    for (const source of configuredSkillPaths(data)) {
       const resolved = resolveConfigSource(source, configPath);
       if (!resolved) continue;
       if (!(await directoryExists(resolved))) {

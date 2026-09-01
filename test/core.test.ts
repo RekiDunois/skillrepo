@@ -58,6 +58,7 @@ test('register is idempotent and unregister removes only registration', async ()
       const config = await readFile(join(f.configDir, 'opencode.jsonc'), 'utf8');
       const matches = config.match(new RegExp(join(f.repo, 'skills').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) ?? [];
       assert.equal(matches.length, 1);
+      assert.deepEqual(JSON.parse(config).skills.paths, [join(f.repo, 'skills')]);
       assert.equal(await readlink(join(f.configDir, 'agents', 'example-repo')), join(f.repo, 'agents'));
 
       await unregisterRepo(f.repo);
@@ -99,6 +100,32 @@ test('register reuses an existing opencode.json and preserves comments', async (
       assert.match(config, /\/\/ keep me/);
       assert.match(config, /example-repo/);
       await assert.rejects(access(join(f.configDir, 'opencode.jsonc')));
+    });
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('legacy mixed skill sources split local paths from remote URLs', async () => {
+  const f = await fixture();
+  try {
+    await mkdir(f.configDir, { recursive: true });
+    await writeFile(
+      join(f.configDir, 'opencode.json'),
+      JSON.stringify({ skills: ['https://example.com/skills', join(f.repo, 'skills')] }, null, 2) + '\n',
+      'utf8',
+    );
+
+    await withConfigDir(f.configDir, async () => {
+      await registerRepo(f.repo);
+      const registered = JSON.parse(await readFile(join(f.configDir, 'opencode.json'), 'utf8'));
+      assert.deepEqual(registered.skills.paths, [join(f.repo, 'skills')]);
+      assert.deepEqual(registered.skills.urls, ['https://example.com/skills']);
+
+      await unregisterRepo(f.repo);
+      const unregistered = JSON.parse(await readFile(join(f.configDir, 'opencode.json'), 'utf8'));
+      assert.deepEqual(unregistered.skills.paths, []);
+      assert.deepEqual(unregistered.skills.urls, ['https://example.com/skills']);
     });
   } finally {
     await rm(f.root, { recursive: true, force: true });
