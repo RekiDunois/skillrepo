@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { globSync, lstatSync, statSync } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 
 function usage(message) {
@@ -18,7 +18,7 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') usage();
-    if (argument === '--kind' || argument === '--name' || argument === '--config') {
+    if (argument === '--kind' || argument === '--name' || argument === '--config' || argument === '--project-root') {
       const value = argv[++index];
       if (!value || value.startsWith('--')) usage(`${argument} requires a value`);
       values[argument.slice(2)] = value;
@@ -29,7 +29,12 @@ function parseArgs(argv) {
 
   if (!['skill', 'agent'].includes(values.kind)) usage('--kind must be skill or agent');
   if (!values.name?.trim()) usage('--name is required');
-  return { kind: values.kind, name: values.name.trim(), config: values.config };
+  return {
+    kind: values.kind,
+    name: values.name.trim(),
+    config: values.config,
+    projectRoot: values['project-root'],
+  };
 }
 
 function expandHome(value) {
@@ -173,10 +178,10 @@ async function collectMarkdownFiles(root) {
   const files = [];
   const visited = new Set();
 
-  async function walk(candidate) {
+  async function walk(logicalCandidate) {
     let actual;
     try {
-      actual = await realpath(candidate);
+      actual = await realpath(logicalCandidate);
     } catch {
       return;
     }
@@ -192,6 +197,7 @@ async function collectMarkdownFiles(root) {
     for (const entry of entries) {
       if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
       const child = join(actual, entry.name);
+      const logicalChild = join(logicalCandidate, entry.name);
       let childStat;
       try {
         childStat = await stat(child);
@@ -199,15 +205,45 @@ async function collectMarkdownFiles(root) {
         continue;
       }
       if (childStat.isDirectory()) {
-        await walk(child);
+        await walk(logicalChild);
       } else if (childStat.isFile() && entry.name.endsWith('.md')) {
-        files.push(await realpath(child));
+        files.push({ path: await realpath(child), logicalPath: logicalChild });
       }
     }
   }
 
   await walk(root);
   return files;
+}
+
+function standardSources(kind, configDir, projectRoot) {
+  if (kind === 'skill') {
+    return [
+      join(projectRoot, '.opencode', 'skills'),
+      join(projectRoot, '.opencode', 'skill'),
+      join(projectRoot, '.claude', 'skills'),
+      join(configDir, 'skills'),
+      join(configDir, 'skill'),
+      join(homedir(), '.claude', 'skills'),
+    ];
+  }
+  return [
+    join(projectRoot, '.opencode', 'agents'),
+    join(projectRoot, '.claude', 'agents'),
+    join(configDir, 'agents'),
+    join(homedir(), '.claude', 'agents'),
+  ];
+}
+
+function resourceId(kind, sourceRoot, logicalPath) {
+  const value = relative(sourceRoot, logicalPath).split(sep).join('/');
+  if (kind === 'skill') {
+    if (value === 'SKILL.md') return basename(sourceRoot);
+    if (!value.endsWith('/SKILL.md')) return null;
+    return value.slice(0, -'/SKILL.md'.length);
+  }
+  if (!value.endsWith('.md')) return null;
+  return basename(value, '.md');
 }
 
 async function frontmatterName(path) {
@@ -248,27 +284,34 @@ function gitState(path) {
   };
 }
 
-async function locate({ kind, name, config: explicitConfig }) {
+async function locate({ kind, name, config: explicitConfig, projectRoot: explicitProjectRoot }) {
   const configFile = configPath(explicitConfig);
   const data = await readConfig(configFile);
-  const configDir = resolve(expandHome(process.env.OPENCODE_CONFIG_DIR ?? dirname(configFile)));
+  const configDir = resolve(expandHome(process.env.OPENCODE_CONFIG_DIR ?? '~/.config/opencode'));
+  const projectRoot = resolve(expandHome(explicitProjectRoot ?? process.cwd()));
   const configured = kind === 'skill'
     ? configuredPaths(data.skills)
     : configuredPaths(data.agents);
-  const roots = kind === 'skill'
-    ? sourceDirectories(configured, configFile)
-    : sourceDirectories([...configured, join(configDir, 'agents')], configFile);
+  const configuredRoots = sourceDirectories(configured, configFile);
+  const roots = [
+    ...sourceDirectories(standardSources(kind, configDir, projectRoot), configFile),
+    ...configuredRoots,
+  ];
   const candidates = [];
 
   for (const root of roots) {
-    for (const path of await collectMarkdownFiles(root.path)) {
-      if (kind === 'skill' && !path.endsWith(`${sep}SKILL.md`)) continue;
-      if (await frontmatterName(path) !== name) continue;
+    for (const file of await collectMarkdownFiles(root.path)) {
+      const id = resourceId(kind, root.path, file.logicalPath);
+      if (id !== name) continue;
+      const sourceRelativePath = relative(root.path, file.logicalPath).split(sep).join('/');
       candidates.push({
-        path,
+        path: file.path,
+        id,
+        sourceRelativePath,
         sourceRoot: await realpath(root.path),
         configuredSource: root.configured,
-        git: gitState(path),
+        frontmatterName: await frontmatterName(file.path),
+        git: gitState(file.path),
       });
     }
   }

@@ -16,21 +16,23 @@ Load this skill before reading or changing any OpenCode skill or agent. The path
    - `$OPENCODE_CONFIG_DIR/opencode.json`.
    - `~/.config/opencode/opencode.jsonc` as the default target when neither file exists.
    - If both config files exist, stop and ask for an explicit choice.
-3. Use the bundled locator. It reads `skills.paths`, the legacy `skills` array, optional `agents.paths`, and the config directory's `agents/` directory. It expands `~`, config-relative paths, and glob patterns, follows source symlinks, and matches frontmatter names exactly.
+3. Use the bundled locator. It reads `skills.paths`, the legacy `skills` array, optional `agents.paths`, standard project/global OpenCode roots, and compatibility roots. It expands `~`, config-relative paths, and glob patterns, follows source symlinks, and reports the real file path.
 
 ```bash
 node /absolute/path/to/skills/skill-development-location/scripts/locate-resource.mjs \
   --kind skill \
-  --name <skill-name>
+  --name <skill-id> \
+  --project-root "$(pwd)"
 
 node /absolute/path/to/skills/skill-development-location/scripts/locate-resource.mjs \
   --kind agent \
-  --name <agent-name>
+  --name <agent-id> \
+  --project-root "$(pwd)"
 ```
 
-The locator returns JSON containing the resolved `path`, `sourceRoot`, config path, and Git state. Use the returned `path` and `gitRoot`, not a guessed path. A non-zero result means the resource is missing or ambiguous; do not edit until the ambiguity is resolved.
+The locator returns JSON containing the resource `id`, resolved real `path`, `sourceRoot`, source-relative path, config path, optional frontmatter metadata, and Git state. A skill ID is its source-relative path with `/SKILL.md` removed; an agent ID is its Markdown filename with `.md` removed. Use the returned `path` and `gitRoot`, not a guessed path. A non-zero result means the resource is missing or ambiguous; do not edit until the ambiguity is resolved.
 
-For a skill, the match must be the `name` in that skill's `SKILL.md` frontmatter. For an agent, the match must be its stable frontmatter `name`; do not infer an agent identity from a filename.
+Frontmatter `name` is returned as optional metadata and is not used as the resource identity. This permits agents without a `name` field and preserves the ID OpenCode derives from the source path.
 
 ## Plan parallel work
 

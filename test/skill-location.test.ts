@@ -24,14 +24,19 @@ test('locates a configured skill and follows an agent directory symlink', async 
   const root = await mkdtemp(join(tmpdir(), 'skill-location-'));
   const configDir = join(root, 'opencode');
   const skillRoot = join(root, 'skill-source');
+  const projectRoot = join(root, 'project');
   const agentRepo = join(root, 'agent-repo');
   try {
     await mkdir(join(skillRoot, 'example-skill'), { recursive: true });
+    await mkdir(join(projectRoot, '.opencode', 'skills', 'project-skill'), { recursive: true });
+    await mkdir(join(configDir, 'skills', 'global-skill'), { recursive: true });
     await mkdir(join(agentRepo, 'agents'), { recursive: true });
     await mkdir(join(configDir, 'agents'), { recursive: true });
     await execFileAsync('git', ['init', '-q', agentRepo]);
-    await writeFile(join(skillRoot, 'example-skill', 'SKILL.md'), '---\nname: example-skill\ndescription: test\n---\n', 'utf8');
-    await writeFile(join(agentRepo, 'agents', 'worker.md'), '---\nname: example-worker\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(skillRoot, 'example-skill', 'SKILL.md'), '---\nname: displayed-skill\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(projectRoot, '.opencode', 'skills', 'project-skill', 'SKILL.md'), '---\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(configDir, 'skills', 'global-skill', 'SKILL.md'), '---\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(agentRepo, 'agents', 'worker.md'), '---\ndescription: test\n---\n', 'utf8');
     await writeFile(
       join(configDir, 'opencode.jsonc'),
       `{
@@ -43,12 +48,20 @@ test('locates a configured skill and follows an agent directory symlink', async 
     await symlink(join(agentRepo, 'agents'), join(configDir, 'agents', 'external-repo'), 'dir');
 
     const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
-    const skill = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'example-skill'], env)).stdout);
+    const skill = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'example-skill', '--project-root', projectRoot], env)).stdout);
     assert.equal(skill.path, await realpath(join(skillRoot, 'example-skill', 'SKILL.md')));
     assert.equal(skill.sourceRoot, await realpath(skillRoot));
+    assert.equal(skill.frontmatterName, 'displayed-skill');
 
-    const agent = JSON.parse((await runLocator(['--kind', 'agent', '--name', 'example-worker'], env)).stdout);
+    const projectSkill = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'project-skill', '--project-root', projectRoot], env)).stdout);
+    assert.equal(projectSkill.path, await realpath(join(projectRoot, '.opencode', 'skills', 'project-skill', 'SKILL.md')));
+
+    const globalSkill = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'global-skill', '--project-root', projectRoot], env)).stdout);
+    assert.equal(globalSkill.path, await realpath(join(configDir, 'skills', 'global-skill', 'SKILL.md')));
+
+    const agent = JSON.parse((await runLocator(['--kind', 'agent', '--name', 'worker', '--project-root', projectRoot], env)).stdout);
     assert.equal(agent.path, await realpath(join(agentRepo, 'agents', 'worker.md')));
+    assert.equal(agent.frontmatterName, null);
     assert.equal(agent.git.managed, true);
     assert.equal(agent.git.gitRoot, await realpath(agentRepo));
     assert.equal(agent.git.dirty, true);
@@ -66,13 +79,13 @@ test('rejects duplicate configured resources instead of guessing', async () => {
     await mkdir(join(first, 'same'), { recursive: true });
     await mkdir(join(second, 'same'), { recursive: true });
     await mkdir(configDir, { recursive: true });
-    const skill = '---\nname: same-skill\ndescription: test\n---\n';
+    const skill = '---\nname: displayed-first\ndescription: test\n---\n';
     await writeFile(join(first, 'same', 'SKILL.md'), skill, 'utf8');
     await writeFile(join(second, 'same', 'SKILL.md'), skill, 'utf8');
     await writeFile(join(configDir, 'opencode.json'), JSON.stringify({ skills: { paths: [first, second] } }), 'utf8');
 
     await assert.rejects(
-      () => runLocator(['--kind', 'skill', '--name', 'same-skill'], { ...process.env, OPENCODE_CONFIG_DIR: configDir }),
+      () => runLocator(['--kind', 'skill', '--name', 'same'], { ...process.env, OPENCODE_CONFIG_DIR: configDir }),
       error => locatorFailure(error) && error.stderr.includes('resource is ambiguous'),
     );
   } finally {
