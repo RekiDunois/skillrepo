@@ -80,6 +80,7 @@ async function main(): Promise<void> {
       console.log(`Registered ${result.repo}`);
       if (result.skillPath) console.log(`  skills: ${result.skillPath}`);
       if (result.agentLink) console.log(`  agents: ${result.agentLink}`);
+      for (const agentLink of result.agentLinks ?? []) console.log(`  agent: ${agentLink}`);
 
       if (values.verify) {
         const results = await verifyRepoRegistered(inventory);

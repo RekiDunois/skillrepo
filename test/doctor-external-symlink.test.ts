@@ -135,6 +135,31 @@ test('doctor accepts configured skills present in OpenCode discovery', async () 
   }
 });
 
+test('doctor reports a missing package-layout skill source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-doctor-package-'));
+  const configDir = join(root, 'opencode');
+  const packageSkills = join(root, 'repo', '.apm', 'skills');
+  const binDir = join(root, 'bin');
+  try {
+    await mkdir(join(packageSkills, 'alpha'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await mkdir(binDir, { recursive: true });
+    await writeFile(join(packageSkills, 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: alpha\n---\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), `${JSON.stringify({ skills: { paths: [packageSkills] } })}\n`, 'utf8');
+
+    const opencode = join(binDir, 'opencode');
+    await writeFile(opencode, '#!/usr/bin/env sh\nexit 0\n', 'utf8');
+    await chmod(opencode, 0o755);
+
+    await rm(packageSkills, { recursive: true, force: true });
+    const result = await withDoctorEnv(configDir, binDir, () => doctor());
+    assert.equal(result.ok, false);
+    assert.ok(result.issues.some(issue => issue.includes(`Missing skill source: ${packageSkills}`)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('doctor does not count a skill ID mentioned in another discovery entry as discovered', async () => {
   const fixture = await makeSkillDiscoveryFixture(JSON.stringify([{ name: 'alpha', description: 'mentions beta' }]));
   try {

@@ -83,7 +83,7 @@ repo/
 After adding real skills or agents, run `skillrepo register <repo>` explicitly.
 `init` does not itself make an empty repository discoverable by OpenCode.
 
-A registered repo follows this convention:
+A registered repo can use either the legacy layout or a standard package authoring layout:
 
 ```text
 repo/
@@ -91,7 +91,17 @@ repo/
 └── agents/
 ```
 
-`register` adds the absolute `repo/skills` path to OpenCode's global `skills` sources and creates one repo-level directory symlink under OpenCode's global `agents/` directory. Agent Markdown files must declare a stable frontmatter `name`.
+```text
+repo/
+├── apm.yml
+└── .apm/
+    ├── skills/
+    └── agents/
+```
+
+`register` adds the selected source directory (`repo/skills` or `repo/.apm/skills`) to OpenCode's global `skills` sources. Legacy agents use one repo-level directory symlink under OpenCode's global `agents/` directory and must declare a stable frontmatter `name`. APM agents use canonical `.agent.md` files and get per-file `<name>.md` symlinks under OpenCode's global `agents/` directory; the agent name comes from the source filename. All links point directly at the original source, so `skillrepo` never copies their contents.
+
+Only one supported layout may be present in a repository. If both layouts contain a `skills` or `agents` source directory, inspection fails closed rather than guessing.
 
 Registration and unregistration are intended to be idempotent. `unregister` only removes linkage owned by the requested repo; it never removes repo contents.
 

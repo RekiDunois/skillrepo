@@ -4,7 +4,7 @@ import { access, mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtemp } from 'node:fs/promises';
-import { opencodeConfigFile, registerRepo, unregisterRepo } from '../src/core.js';
+import { inspectRepo, opencodeConfigFile, registerRepo, unregisterRepo } from '../src/core.js';
 
 async function makeRepo(
   root: string,
@@ -23,6 +23,24 @@ async function makeRepo(
   await writeFile(
     join(repo, 'agents', `${agentName}.md`),
     `---\nname: ${agentName}\ndescription: test\nmode: subagent\n---\n`,
+    'utf8',
+  );
+  return repo;
+}
+
+async function makePackageRepo(root: string, name: string, skillId: string, agentName: string): Promise<string> {
+  const repo = join(root, name);
+  await mkdir(join(repo, '.apm', 'skills', skillId), { recursive: true });
+  await mkdir(join(repo, '.apm', 'agents'), { recursive: true });
+  await writeFile(join(repo, 'apm.yml'), 'name: test-package\n', 'utf8');
+  await writeFile(
+    join(repo, '.apm', 'skills', skillId, 'SKILL.md'),
+    `---\nname: ${skillId}\ndescription: package test\n---\n`,
+    'utf8',
+  );
+  await writeFile(
+    join(repo, '.apm', 'agents', `${agentName}.agent.md`),
+    '---\ndescription: package test\nmode: subagent\n---\n',
     'utf8',
   );
   return repo;
@@ -68,6 +86,54 @@ test('register is idempotent and unregister removes only registration', async ()
     });
   } finally {
     await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('package layout registers and unregisters its original .apm sources', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-'));
+  const repo = await makePackageRepo(root, 'package-repo', 'package-skill', 'package-agent');
+  const configDir = join(root, 'opencode');
+  try {
+    await withConfigDir(configDir, async () => {
+      const inventory = await inspectRepo(repo);
+      assert.equal(inventory.layout, 'apm');
+      assert.equal(inventory.skillsDir, join(repo, '.apm', 'skills'));
+      assert.equal(inventory.agentsDir, join(repo, '.apm', 'agents'));
+      assert.deepEqual(inventory.agentNames, ['package-agent']);
+      assert.deepEqual(inventory.agentSources, [{
+        name: 'package-agent',
+        sourcePath: join(repo, '.apm', 'agents', 'package-agent.agent.md'),
+      }]);
+
+      const result = await registerRepo(repo);
+      assert.equal(result.skillPath, join(repo, '.apm', 'skills'));
+      assert.deepEqual(JSON.parse(await readFile(join(configDir, 'opencode.jsonc'), 'utf8')).skills.paths, [
+        join(repo, '.apm', 'skills'),
+      ]);
+      assert.equal(await readlink(join(configDir, 'agents', 'package-agent.md')), join(repo, '.apm', 'agents', 'package-agent.agent.md'));
+
+      await unregisterRepo(repo);
+      assert.deepEqual(JSON.parse(await readFile(join(configDir, 'opencode.jsonc'), 'utf8')).skills.paths, []);
+      await assert.rejects(access(join(configDir, 'agents', 'package-agent.md')));
+      assert.equal(await access(join(repo, '.apm', 'skills', 'package-skill', 'SKILL.md')).then(() => true), true);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('register fails closed when legacy and package source layouts coexist', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-'));
+  const repo = await makePackageRepo(root, 'ambiguous-repo', 'package-skill', 'package-agent');
+  const configDir = join(root, 'opencode');
+  try {
+    await mkdir(join(repo, 'skills', 'legacy-skill'), { recursive: true });
+    await writeFile(join(repo, 'skills', 'legacy-skill', 'SKILL.md'), '---\nname: legacy-skill\ndescription: legacy\n---\n', 'utf8');
+    await withConfigDir(configDir, async () => {
+      await assert.rejects(() => inspectRepo(repo), /ambiguous.*layout|multiple.*layout/i);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
