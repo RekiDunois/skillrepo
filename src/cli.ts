@@ -272,6 +272,13 @@ async function main(): Promise<void> {
     if (result.verification.length && !printVerification(result.verification)) {
       throw new Error('OpenCode verification failed after migration. Run skillrepo doctor for details.');
     }
+    for (const runtime of result.runtimeVerification) {
+      console.log(`${runtime.ok ? '✓' : '✗'} ${runtime.phase}`);
+      if (runtime.diagnosticsPath) console.log(`  diagnostic: ${runtime.diagnosticsPath}`);
+    }
+    if (!values.verify) {
+      console.log('Runtime compatibility was not verified (--no-verify).');
+    }
     if (!result.skillMappings.length) {
       if (values['template-out']) {
         throw new Error('--template-out requires at least one migrated skill');

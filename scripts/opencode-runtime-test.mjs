@@ -324,7 +324,7 @@ async function createFixture(root, mockBaseUrl) {
   delete env.OPENCODE_CONFIG
 
   const cli = resolve(dirname(fileURLToPath(import.meta.url)), '../dist/src/cli.js')
-  await execFileAsync(process.execPath, [cli, 'migration', 'apply', '--plan', planPath, '--target-root', targetRoot, '--execute', '--no-verify'], { env })
+  await execFileAsync(process.execPath, [cli, 'migration', 'apply', '--plan', planPath, '--target-root', targetRoot, '--execute'], { env })
   await access(skillPath)
 
   const debug = await execFileAsync(process.env.OPENCODE_BIN ?? 'opencode', ['debug', 'skill'], {
@@ -455,7 +455,7 @@ async function runDiscoveryTest(context) {
 async function runExecutionTest(context) {
   const results = {}
   try {
-    results.web = await executeSkillSession(context, 'Web', context.webBaseUrl)
+    results.web = await executeSkillSession(context, 'serve', context.webBaseUrl)
     results.tui = await executeSkillSession(context, 'TUI', context.tuiBaseUrl)
     return results
   } catch (error) {
@@ -484,7 +484,7 @@ async function main() {
     context.tuiBaseUrl = `http://127.0.0.1:${tuiPort}`
     context.webBaseUrl = `http://127.0.0.1:${webPort}`
     context.web = startProcess(
-      [context.executable, 'web', '--pure', '--hostname', '127.0.0.1', '--port', String(webPort)],
+      [context.executable, 'serve', '--pure', '--hostname', '127.0.0.1', '--port', String(webPort)],
       { cwd: context.fixture.projectDir, env: context.fixture.env, port: webPort },
     )
     // Both runtimes may install a configured custom provider on first use.
@@ -496,15 +496,15 @@ async function main() {
     )
     await waitForHealth(context.tuiBaseUrl, context.tui)
 
-    console.log('Test 1: TUI/Web /skill discovery parity')
+    console.log('Test 1: TUI/serve /skill discovery parity')
     const discovery = await runDiscoveryTest(context)
     context.lastTuiSkills = discovery.tui
     context.lastWebSkills = discovery.web
-    console.log(`  PASS (TUI ${discovery.tui.count} skills, Web ${discovery.web.count} skills)`)
+    console.log(`  PASS (TUI ${discovery.tui.count} skills, serve ${discovery.web.count} skills)`)
 
-    console.log('Test 2: real skill() execution in Web and standalone full TUI')
+    console.log('Test 2: real skill() execution in serve and standalone full TUI')
     const execution = await runExecutionTest(context)
-    console.log(`  PASS (Web ${execution.web.session.id}, TUI ${execution.tui.session.id})`)
+    console.log(`  PASS (serve ${execution.web.session.id}, TUI ${execution.tui.session.id})`)
   } finally {
     await context.tui?.stop()
     await context.web?.stop()

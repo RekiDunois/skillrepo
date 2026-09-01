@@ -40,6 +40,21 @@ import {
   type RepoInventory,
   type VerifyResult,
 } from './core.js';
+import {
+  verifyOpenCodeRuntime,
+  type RuntimeVerificationContext,
+  type RuntimeVerificationPhase,
+  type RuntimeVerificationResult,
+  type RuntimeSkillExpectation,
+  type RuntimeVerifier,
+} from './runtime.js';
+
+export type {
+  RuntimeVerificationContext,
+  RuntimeVerificationPhase,
+  RuntimeVerificationResult,
+  RuntimeVerifier,
+} from './runtime.js';
 
 type MigrationRepoPlan = {
   id: string;
@@ -161,6 +176,12 @@ type JournalRegistration = {
   prospectiveConfigFingerprint: string;
 };
 
+type RuntimeVerificationRecord = {
+  phase: RuntimeVerificationPhase;
+  ok: boolean;
+  diagnosticsPath?: string;
+};
+
 type MigrationJournal = {
   schemaVersion: 2;
   transactionId: string;
@@ -201,6 +222,10 @@ type MigrationJournal = {
   skillMappings: Array<SkillMapping & { operationId: string }>;
   verification: { requested: boolean; passed: boolean };
   targetGit?: Record<string, MigrationGitState>;
+  runtimeVerification?: {
+    records: RuntimeVerificationRecord[];
+    diagnosticsPath?: string;
+  };
 };
 
 type PreflightResult = {
@@ -219,6 +244,8 @@ export type MigrationApplyOptions = {
   dryRun?: boolean;
   verify?: boolean;
   resume?: boolean;
+  projectDir?: string;
+  runtimeVerifier?: RuntimeVerifier;
 };
 
 export type MigrationApplyResult = {
@@ -239,6 +266,8 @@ export type MigrationApplyResult = {
   skillMappings: SkillMapping[];
   verified: boolean;
   git: Record<string, MigrationGitState>;
+  runtimeVerification: RuntimeVerificationRecord[];
+  runtimeVerificationSkipped: boolean;
 };
 
 const JOURNAL_DIRECTORY = '.skillrepo-migrations';
@@ -1578,13 +1607,18 @@ async function createFileCompatibilityShim(
   await persistJournal(journal);
 }
 
-async function prepareOperations(journal: MigrationJournal): Promise<void> {
+async function prepareOperations(
+  journal: MigrationJournal,
+  selectedOperations: JournalOperation[] = journal.operations,
+  stagingReady = false,
+): Promise<void> {
   journal.phase = 'preparing';
   journal.status = 'in-progress';
   await persistJournal(journal);
-  await writeStagingMarker(journal);
+  if (stagingReady) await assertStagingOwner(journal);
+  else await writeStagingMarker(journal);
 
-  for (const operation of journal.operations) {
+  for (const operation of selectedOperations) {
     await assertCurrentFingerprint(operation.source, operation.sourceFingerprint, 'Migration source');
     if (!sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity)) {
       throw new Error(`Migration source identity changed: ${operation.source}`);
@@ -1669,11 +1703,15 @@ async function moveOperation(operation: JournalOperation, journal: MigrationJour
   await persistJournal(journal);
 }
 
-async function inspectMigratedInventories(journal: MigrationJournal): Promise<RepoInventory[]> {
+async function inspectMigratedInventories(
+  journal: MigrationJournal,
+  selectedOperations: JournalOperation[] = journal.operations,
+): Promise<RepoInventory[]> {
   const inventories: RepoInventory[] = [];
-  for (const repoId of journal.repositories) {
+  const repositoryIds = [...new Set(selectedOperations.map(operation => operation.repoId))];
+  for (const repoId of repositoryIds) {
     const inventory = await inspectRepo(join(journal.targetRoot, repoId));
-    const operations = journal.operations.filter(operation => operation.repoId === repoId);
+    const operations = selectedOperations.filter(operation => operation.repoId === repoId);
     for (const operation of operations) {
       if (!operation.targetFingerprint || (await fingerprintPath(operation.target)) !== operation.targetFingerprint) {
         throw new Error(`Migrated target changed before registration: ${operation.target}`);
@@ -1702,6 +1740,82 @@ async function inspectMigratedInventories(journal: MigrationJournal): Promise<Re
     inventories.push(inventory);
   }
   return inventories;
+}
+
+function runtimeMarker(text: string, skillId: string): string {
+  const firstLineEnd = text.indexOf('\n');
+  const openingEnd = firstLineEnd >= 0 && text.slice(0, firstLineEnd).trim() === '---' ? firstLineEnd + 1 : 0;
+  const closingOffset = openingEnd ? text.slice(openingEnd).search(/\r?\n---(?:\r?\n|$)/) : -1;
+  const body = closingOffset >= 0
+    ? text.slice(openingEnd + closingOffset).replace(/^\r?\n---\r?\n?/, '').trim()
+    : text.slice(openingEnd).trim();
+  return body.split(/\r?\n/).find(line => line.trim())?.trim().slice(0, 200) || `name: ${skillId}`;
+}
+
+async function runtimeSkillExpectation(operation: JournalOperation): Promise<RuntimeSkillExpectation> {
+  const skillText = await readFile(join(operation.target, 'SKILL.md'), 'utf8');
+  return {
+    id: operation.expectedSkillId!,
+    source: operation.source,
+    target: operation.target,
+    marker: runtimeMarker(skillText, operation.expectedSkillId!),
+  };
+}
+
+function redactRuntimeDiagnostic(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value
+      .replace(/(api[_-]?key|token|authorization|password|secret)\s*[:=]\s*[^\s,;}]+/gi, '$1:[REDACTED]')
+      .replace(/sk-[A-Za-z0-9_-]+/g, '[REDACTED]');
+  }
+  if (Array.isArray(value)) return value.map(item => redactRuntimeDiagnostic(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      key,
+      /key|token|secret|password|authorization/i.test(key) ? '[REDACTED]' : redactRuntimeDiagnostic(item),
+    ]));
+  }
+  return value;
+}
+
+async function writeRuntimeDiagnostic(
+  journal: MigrationJournal,
+  context: RuntimeVerificationContext,
+  result: RuntimeVerificationResult,
+): Promise<string> {
+  const path = join(journalDirectory(journal.sourceRoot), `${journal.transactionId}.${context.phase}.diagnostic.json`);
+  const report = {
+    transactionId: journal.transactionId,
+    failurePhase: context.phase,
+    journalPath: journal.journalPath,
+    rollback: 'pending',
+    context: {
+      projectDir: context.projectDir,
+      configPath: context.configPath,
+      configFingerprint: context.configFingerprint,
+      skillSources: context.skillSources,
+      expectedSkillIds: context.expectedSkillIds,
+      expectedAgentNames: context.expectedAgentNames,
+      skillMappings: context.skills.map(skill => ({ id: skill.id, source: skill.source, target: skill.target })),
+    },
+    runtime: redactRuntimeDiagnostic(result),
+  };
+  await writeFile(path, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  return path;
+}
+
+async function updateRuntimeDiagnostic(journal: MigrationJournal, rollback: { complete: boolean; issues: string[] }): Promise<void> {
+  const path = journal.runtimeVerification?.diagnosticsPath;
+  if (!path) return;
+  try {
+    const report = await readJson(path);
+    report.rollback = rollback.complete ? 'complete' : 'incomplete';
+    if (rollback.issues.length) report.rollbackIssues = redactRuntimeDiagnostic(rollback.issues);
+    await writeFile(path, `${JSON.stringify(report, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // The original migration error and journal remain authoritative if the
+    // optional diagnostic enrichment cannot be written.
+  }
 }
 
 function snapshotFromJournal(journal: MigrationJournal): OpenCodeConfigSnapshot {
@@ -1793,22 +1907,88 @@ async function assertMigratedLayoutCurrent(journal: MigrationJournal): Promise<v
   }
 }
 
+async function runRuntimeVerification(
+  journal: MigrationJournal,
+  options: MigrationApplyOptions,
+  phase: RuntimeVerificationPhase,
+  selectedOperations: JournalOperation[],
+): Promise<void> {
+  if (options.verify === false) return;
+  if (!journal.registration) throw new Error(`Transaction registration plan is missing during ${phase}`);
+  const skills = await Promise.all(
+    selectedOperations
+      .filter(operation => operation.kind === 'skill' && operation.expectedSkillId)
+      .map(operation => runtimeSkillExpectation(operation)),
+  );
+  if (!skills.length) return;
+
+  const context: RuntimeVerificationContext = {
+    phase,
+    transactionId: journal.transactionId,
+    projectDir: resolve(expandHome(options.projectDir ?? process.cwd())),
+    configPath: journal.config.path,
+    configFingerprint: journal.config.newFingerprint ?? journal.config.originalFingerprint,
+    skillSources: journal.registration.skillSources,
+    agentLinks: journal.registration.agentLinks.map(link => ({ path: link.path, target: link.target })),
+    expectedSkillIds: selectedOperations.flatMap(operation => operation.expectedSkillIds ?? []),
+    expectedAgentNames: journal.registration.inventories.flatMap(inventory => inventory.agentNames),
+    skills,
+  };
+  const verifier = options.runtimeVerifier ?? verifyOpenCodeRuntime;
+  let result: RuntimeVerificationResult;
+  try {
+    result = await verifier(context);
+  } catch (error) {
+    result = {
+      ok: false,
+      phase,
+      checks: [{ ok: false, command: `OpenCode ${phase}`, stdout: '', stderr: error instanceof Error ? error.message : String(error) }],
+      diagnostics: { verifierError: error instanceof Error ? error.message : String(error) },
+    };
+  }
+
+  const record: RuntimeVerificationRecord = { phase, ok: result.ok };
+  journal.runtimeVerification ??= { records: [] };
+  journal.runtimeVerification.records.push(record);
+  if (!result.ok) {
+    record.diagnosticsPath = await writeRuntimeDiagnostic(journal, context, result);
+    journal.runtimeVerification.diagnosticsPath = record.diagnosticsPath;
+  }
+  await persistJournal(journal);
+  if (!result.ok) {
+    const detail = result.checks.filter(check => !check.ok).map(check => `${check.command}: ${check.stderr.trim() || 'verification failed'}`).join('\n');
+    throw new Error(`${phase} failed${detail ? `:\n${detail}` : ''} (diagnostic: ${record.diagnosticsPath})`);
+  }
+}
+
 async function registerTransaction(
   journal: MigrationJournal,
   preflightResult: PreflightResult,
   verifyRuntime: boolean,
+  selectedOperations: JournalOperation[] = journal.operations,
 ): Promise<void> {
   journal.phase = 'registering';
   await persistJournal(journal);
   const snapshot = snapshotFromJournal(journal);
-  await assertConfigSnapshotCurrent(snapshot);
+  if (journal.config.changed) {
+    const current = await readOpenCodeConfigSnapshot(snapshot.path);
+    if (current.fingerprint !== journal.config.newFingerprint
+      || !sameIdentity(current.identity, journal.config.newIdentity)
+      || current.mode !== journal.config.newMode) {
+      throw new Error(`OpenCode config changed during migration: ${snapshot.path}`);
+    }
+  } else {
+    await assertConfigSnapshotCurrent(snapshot);
+  }
 
-  const inventories = await inspectMigratedInventories(journal);
+  const inventories = await inspectMigratedInventories(journal, selectedOperations);
   if (verifyRuntime) {
     for (const inventory of inventories) await assertNoRuntimeCollisions(inventory);
   }
   const registration = await prepareRegistration(inventories, snapshot);
-  const prospective = prospectiveOpenCodeConfig(snapshot, registration.skillSources);
+  const prospective = selectedOperations.length === journal.operations.length
+    ? prospectiveOpenCodeConfig(snapshot, registration.skillSources)
+    : preflightResult.prospectiveConfig;
   if (
     prospective.text !== preflightResult.prospectiveConfig.text
     || prospective.text !== journal.prospectiveConfigText
@@ -1828,13 +2008,22 @@ async function registerTransaction(
 
   await createAgentRegistrationLinks(journal);
   await assertAgentRegistrationLinksCurrent(journal);
-  await assertConfigSnapshotCurrent(snapshot);
+  if (!journal.config.changed) await assertConfigSnapshotCurrent(snapshot);
 
-  journal.config.changed = registration.addedSkillSources.length > 0;
-  if (journal.config.changed) journal.config.newFingerprint = journal.registration.prospectiveConfigFingerprint;
+  const currentConfig = await readOpenCodeConfigSnapshot(snapshot.path);
+  if (currentConfig.fingerprint === journal.registration.prospectiveConfigFingerprint) {
+    journal.config.changed = currentConfig.fingerprint !== snapshot.fingerprint;
+    journal.config.newFingerprint = journal.config.changed ? currentConfig.fingerprint : undefined;
+    journal.config.newIdentity = currentConfig.identity;
+    journal.config.newMode = currentConfig.mode;
+  } else {
+    if (journal.config.changed) throw new Error(`OpenCode config changed before registration completion: ${snapshot.path}`);
+    journal.config.changed = true;
+    journal.config.newFingerprint = journal.registration.prospectiveConfigFingerprint;
+  }
   await persistJournal(journal);
 
-  if (journal.config.changed) {
+  if (currentConfig.fingerprint !== journal.registration.prospectiveConfigFingerprint) {
     await ensureDirectoryPath(dirname(snapshot.path), journal);
     const actualFingerprint = await writeOpenCodeConfigAtomically(snapshot, prospective.text);
     if (actualFingerprint !== journal.config.newFingerprint) {
@@ -2736,6 +2925,8 @@ async function resultFromJournal(
     skillMappings: journal.skillMappings,
     verified: journal.verification.passed,
     git,
+    runtimeVerification: journal.runtimeVerification?.records ?? [],
+    runtimeVerificationSkipped: options.verify === false,
   };
 }
 
@@ -2859,11 +3050,25 @@ async function executeTransaction(
   preflightResult: PreflightResult,
   options: MigrationApplyOptions,
 ): Promise<MigrationApplyResult> {
-  await prepareOperations(journal);
+  const canary = journal.operations.find(operation => operation.kind === 'skill');
+  const canaryMoved = options.verify !== false && Boolean(canary);
+  if (canaryMoved && canary) {
+    await prepareOperations(journal, [canary]);
+    await moveOperation(canary, journal);
+    await registerTransaction(journal, preflightResult, true, [canary]);
+    await runRuntimeVerification(journal, options, 'canary-runtime-verification', [canary]);
+    const remaining = journal.operations.filter(operation => operation !== canary);
+    if (remaining.length) await prepareOperations(journal, remaining, true);
+  } else {
+    await prepareOperations(journal);
+  }
 
   journal.phase = 'committing';
   await persistJournal(journal);
-  for (const operation of journal.operations) await moveOperation(operation, journal);
+  for (const operation of journal.operations) {
+    if (canaryMoved && operation === canary) continue;
+    await moveOperation(operation, journal);
+  }
 
   await registerTransaction(journal, preflightResult, options.verify !== false);
 
@@ -2883,6 +3088,12 @@ async function executeTransaction(
     journal.verification.passed = true;
     await persistJournal(journal);
   }
+  await runRuntimeVerification(
+    journal,
+    options,
+    'final-runtime-verification',
+    journal.operations.filter(operation => operation.kind === 'skill'),
+  );
   await assertConfigPostWriteState(journal);
   await assertAgentRegistrationLinksCurrent(journal);
   await assertMigratedLayoutCurrent(journal);
@@ -2914,7 +3125,9 @@ async function executeTransaction(
     configPath: journal.config.path,
     skillMappings: journal.skillMappings,
     verified: journal.verification.passed,
-    git: journal.targetGit,
+    git: journal.targetGit ?? {},
+    runtimeVerification: journal.runtimeVerification?.records ?? [],
+    runtimeVerificationSkipped: options.verify === false,
   };
 }
 
@@ -3150,6 +3363,8 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
       skillMappings: preflightResult.skillMappings,
       verified: false,
       git: {},
+      runtimeVerification: [],
+      runtimeVerificationSkipped: options.verify === false,
     };
   }
 
@@ -3197,6 +3412,7 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
         issues: [rollbackError instanceof Error ? rollbackError.message : String(rollbackError)],
       };
     }
+    await updateRuntimeDiagnostic(journal, rollback);
     const original = error instanceof Error ? error.message : String(error);
     const status = rollback.complete ? 'rollback-complete' : 'rollback-incomplete';
     throw new Error(
