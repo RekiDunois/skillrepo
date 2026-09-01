@@ -126,6 +126,33 @@ test('registered resource resolver can derive an agent-only repo without a secon
   }
 });
 
+test('registered resource paths in a package layout resolve from the repository root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-runtime-package-'));
+  const configDir = join(root, 'opencode');
+  const repo = join(root, 'package-repo');
+  const skills = join(repo, '.apm', 'skills');
+  const script = join(repo, 'bin', 'fixture.sh');
+  const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+
+  try {
+    await mkdir(skills, { recursive: true });
+    await mkdir(join(repo, 'bin'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), `{"skills":[${JSON.stringify(skills)}]}\n`, 'utf8');
+    await writeFile(script, '#!/usr/bin/env bash\nprintf "package:%s\\n" "$1"\n', 'utf8');
+    await chmod(script, 0o755);
+
+    assert.equal(await resolveRegisteredRepo('package-repo', env), repo);
+    assert.equal(await resolveRegisteredResource('package-repo', 'bin/fixture.sh', env), await realpath(script));
+    const executed = await runCli(['exec', 'package-repo', 'bin/fixture.sh', '--probe'], env);
+    assert.equal(executed.code, 0, executed.stderr);
+    assert.equal(executed.stdout, 'package:--probe\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('runtime capability check distinguishes current exec-capable CLI from a missing binary', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-runtime-capability-'));
   const bin = join(root, 'bin');

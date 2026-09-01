@@ -1,9 +1,11 @@
 import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 
 const templateUrl = new URL('../../templates/opencode-migration.gitignore', import.meta.url);
+export type InitLayout = 'apm' | 'legacy';
 
-export async function initRepo(inputPath: string, cwd = process.cwd()): Promise<string> {
+export async function initRepo(inputPath: string, cwd = process.cwd(), layout: InitLayout = 'apm'): Promise<string> {
+  if (layout !== 'apm' && layout !== 'legacy') throw new Error(`Unsupported repository layout: ${layout}`);
   const target = resolve(cwd, inputPath);
   const template = await readFile(templateUrl, 'utf8');
 
@@ -22,11 +24,17 @@ export async function initRepo(inputPath: string, cwd = process.cwd()): Promise<
   }
 
   if (!targetExists) await mkdir(target, { recursive: true });
-  await mkdir(resolve(target, 'skills'));
-  await mkdir(resolve(target, 'agents'));
+  const sourceRoot = layout === 'apm' ? resolve(target, '.apm') : target;
+  await mkdir(resolve(sourceRoot, 'skills'), { recursive: true });
+  await mkdir(resolve(sourceRoot, 'agents'), { recursive: true });
   await writeFile(resolve(target, '.gitignore'), template, { encoding: 'utf8', flag: 'wx' });
-  await writeFile(resolve(target, 'skills', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
-  await writeFile(resolve(target, 'agents', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
+  if (layout === 'apm') {
+    const name = basename(target);
+    const manifestName = /^[A-Za-z0-9._-]+$/.test(name) ? name : JSON.stringify(name);
+    await writeFile(resolve(target, 'apm.yml'), `name: ${manifestName}\n`, { encoding: 'utf8', flag: 'wx' });
+  }
+  await writeFile(resolve(sourceRoot, 'skills', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
+  await writeFile(resolve(sourceRoot, 'agents', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
 
   return target;
 }

@@ -27,14 +27,27 @@ node /absolute/path/to/skills/skill-development-location/scripts/locate-resource
   --project-root "$(pwd)"
 ```
 
-4. Treat the locator's `path`, `sourceRoot`, `sourceRelativePath`, `config`,
-   `frontmatterName`, and `git` fields as the resource identity. The Git root
+4. Treat the locator's `path`, `sourceRoot`, `sourceRelativePath`, `repoRoot`,
+   `layout`, `config`, `frontmatterName`, and `git` fields as the resource
+   identity. `repoRoot` is the repository root used for repository-relative
+   resources; it is never inferred by taking the parent of `.apm`. The Git root
    is `git.gitRoot`, and Git ownership is `git.managed`.
 5. If the result is missing or ambiguous, stop and ask for clarification.
    Never choose a path from a similar directory name, search order, or recent
    modification time.
 6. If the path is in a compatibility shell, symlink, cache, or generated
    mirror, stop and locate the real Git source instead.
+
+The locator supports both repository authoring layouts:
+
+```text
+<repo>/skills/<skill-id>/SKILL.md
+<repo>/.apm/skills/<skill-id>/SKILL.md
+```
+
+The result's `layout` is `skillrepo` for the first form and `apm` for the
+second. For package layout, `sourceRoot` is `<repo>/.apm/skills` while
+`repoRoot` remains `<repo>`.
 
 The locator's configuration precedence is authoritative: `OPENCODE_CONFIG`,
 then `OPENCODE_CONFIG_DIR/opencode.jsonc`, then
@@ -63,12 +76,17 @@ state when the skill is useful and what it solves; do not invent `trigger`,
 Do not put absolute user paths, credentials, cookies, browser profiles,
 session state, build output, or local logs into a skill. Runtime commands must
 use repository-relative resources. When a registered repository resource must
-be launched from OpenCode, use the installed `skillrepo exec <repo-id>
-<repo-relative-resource>` command rather than guessing an installation path.
+be launched from OpenCode, calculate the resource path from the locator's
+`repoRoot` and use the installed `skillrepo exec <repo-id>
+<repo-relative-resource>` command rather than guessing an installation path. A
+package-layout resource such as `<repo>/.apm/skills/foo/scripts/run.sh` is
+passed as `.apm/skills/foo/scripts/run.sh`, not as a path relative to `.apm`.
 
 ## Validate After Editing
 
-1. Run the locator again and confirm it still identifies the exact file edited.
+1. Run the locator again and confirm the exact target file, `repoRoot`,
+   `layout`, and `sourceRoot` are unchanged. A changed source identity is a
+   failure.
 2. Parse the frontmatter and confirm the expected stable skill ID and field
    types.
 3. Run focused tests, then the target repository's full tests.

@@ -46,7 +46,7 @@ The migration commands are for moving an existing OpenCode installation into ext
 ## v0 scope
 
 ```bash
-skillrepo init <dir>
+skillrepo init <dir> [--layout <apm|legacy>]
 skillrepo register <repo>
 skillrepo unregister <repo>
 skillrepo exec <repo-id> <repo-relative-resource> [args...]
@@ -59,8 +59,9 @@ skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path
 skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]
 ```
 
-`init` creates a new skillrepo repository skeleton without initializing Git,
-registering the repository, or changing OpenCode configuration:
+`init` creates a new package-layout skill repository by default, without
+initializing Git, registering the repository, or changing OpenCode
+configuration:
 
 ```bash
 skillrepo init ./new-repo
@@ -74,14 +75,18 @@ result is:
 ```text
 repo/
 ├── .gitignore
-├── skills/
-│   └── .gitkeep
-└── agents/
-    └── .gitkeep
+├── apm.yml
+└── .apm/
+    ├── skills/
+    │   └── .gitkeep
+    └── agents/
+        └── .gitkeep
 ```
 
-After adding real skills or agents, run `skillrepo register <repo>` explicitly.
-`init` does not itself make an empty repository discoverable by OpenCode.
+Use `skillrepo init --layout legacy <dir>` only when the legacy `skills/` and
+`agents/` layout is explicitly required. After adding real skills or agents,
+run `skillrepo register <repo>` explicitly. `init` does not itself make an
+empty repository discoverable by OpenCode.
 
 A registered repo can use either the legacy layout or a standard package authoring layout:
 
@@ -121,7 +126,13 @@ skillrepo register ./example --no-verify
 skillrepo exec browser-pdf-tools skills/browser-pdf-core/chrome-mcp-wrapper.sh --scan
 ```
 
-The resource path must be repo-relative, remain inside the registered repo, and resolve to a file. Absolute resource paths and `..` escapes are rejected. This command is intended for portable runtime frontmatter that must launch a file inside a repo without hard-coding the repo's installation directory or the user's home directory.
+The resource path must be repo-relative to the actual repository root, remain
+inside that repository, and resolve to a file. Absolute resource paths and `..`
+escapes are rejected. For package layout, use paths such as
+`.apm/skills/foo/scripts/run.sh`; do not treat `.apm` as the repository root.
+This command is intended for portable runtime frontmatter that must launch a
+file inside a repo without hard-coding the repo's installation directory or the
+user's home directory.
 
 ## Thin migration apply
 
@@ -271,14 +282,14 @@ node skills/skill-development-location/scripts/locate-resource.mjs \
 
 It also documents parallel work ownership, Conventional Commit rules, staged-diff checks, and the push/PR handoff.
 
-This repository also ships the `skill-modification` entry skill. Register this
-repository with OpenCode to make it discoverable:
+This repository also ships the `skill-creation` and `skill-modification` entry
+skills. Register this repository with OpenCode to make them discoverable:
 
 ```bash
 skillrepo register /path/to/skillrepo
 ```
 
-Then start a new OpenCode session and explicitly request `skill-modification`
-when a task changes an existing skill. The skill uses
-`skill-development-location` to resolve the authoritative source before any
-edit; it does not add custom `trigger` or `when` frontmatter fields.
+Then start a new OpenCode session and explicitly request `skill-creation` when
+creating a new skill, or `skill-modification` when changing an existing skill.
+Both workflows resolve the authoritative source/layout before editing; neither
+adds custom `trigger` or `when` frontmatter fields.

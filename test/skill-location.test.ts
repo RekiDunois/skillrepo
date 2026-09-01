@@ -116,6 +116,8 @@ test('preserves OpenCode V1 names and legacy agent roots', async () => {
     assert.equal(skill.path, await realpath(join(skillRoot, 'group', 'release', 'SKILL.md')));
     assert.equal(skill.id, 'release');
     assert.equal(skill.identifiers.includes('group/release'), true);
+    assert.equal(skill.repoRoot, await realpath(root));
+    assert.equal(skill.layout, 'skillrepo');
 
     const reviewer = JSON.parse((await runLocator(['--kind', 'agent', '--name', 'reviewer', '--project-root', projectRoot], env)).stdout);
     assert.equal(reviewer.path, await realpath(join(projectAgent, 'reviewer.md')));
@@ -213,6 +215,37 @@ test('uses an explicit config and reports missing resources', async () => {
       error => locatorFailure(error) && error.stderr.includes('resource not found'),
     );
     assert.equal((await readFile(config, 'utf8')).includes('skills'), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('returns the package repository root and layout instead of the .apm directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-package-'));
+  const repo = join(root, 'package-repo');
+  const sourceRoot = join(repo, '.apm', 'skills');
+  const skill = join(sourceRoot, 'new-skill', 'SKILL.md');
+  const configDir = join(root, 'opencode');
+  try {
+    await mkdir(dirname(skill), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await execFileAsync('git', ['init', '-q', repo]);
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\n', 'utf8');
+    await writeFile(skill, '---\nname: new-skill\ndescription: package skill\n---\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), JSON.stringify({ skills: { paths: [sourceRoot] } }), 'utf8');
+
+    const found = JSON.parse((await runLocator([
+      '--kind', 'skill',
+      '--name', 'new-skill',
+      '--project-root', root,
+    ], { ...process.env, OPENCODE_CONFIG_DIR: configDir })).stdout);
+
+    assert.equal(found.path, await realpath(skill));
+    assert.equal(found.sourceRoot, await realpath(sourceRoot));
+    assert.equal(found.sourceRelativePath, 'new-skill/SKILL.md');
+    assert.equal(found.repoRoot, await realpath(repo));
+    assert.equal(found.layout, 'apm');
+    assert.equal(found.git.gitRoot, await realpath(repo));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

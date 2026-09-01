@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
 const SKILL_NAME = 'skill-modification'
+const SKILL_NAMES = [SKILL_NAME, 'skill-creation']
 const EXPECTED_RAW_SKILL_CONTENT_MARKER = 'SKILLREPO_SKILL_MODIFICATION_RUNTIME_MARKER_2026'
 const EXPECTED_SKILL_DESCRIPTION_FRAGMENT = 'Resolve the authoritative source path before editing'
 const SUCCESS_MARKER = 'SKILL_LOAD_OK'
@@ -285,7 +286,7 @@ async function createFixture(root, mockBaseUrl) {
   const homeDir = join(root, 'home')
   const projectDir = join(root, 'project')
   const repoRoot = join(root, 'init-runtime-repo')
-  const skillPath = join(repoRoot, 'skills', SKILL_NAME, 'SKILL.md')
+  const skillPath = join(repoRoot, '.apm', 'skills', SKILL_NAME, 'SKILL.md')
 
   await mkdir(configDir, { recursive: true })
   await mkdir(homeDir, { recursive: true })
@@ -310,8 +311,11 @@ async function createFixture(root, mockBaseUrl) {
 
   const cli = resolve(dirname(fileURLToPath(import.meta.url)), '../dist/src/cli.js')
   await execFileAsync(process.execPath, [cli, 'init', repoRoot], { env })
-  await mkdir(dirname(skillPath), { recursive: true })
-  await writeFile(skillPath, skillContent, 'utf8')
+  for (const skillName of SKILL_NAMES) {
+    const source = resolve(dirname(fileURLToPath(import.meta.url)), `../skills/${skillName}/SKILL.md`)
+    await mkdir(join(repoRoot, '.apm', 'skills', skillName), { recursive: true })
+    await writeFile(join(repoRoot, '.apm', 'skills', skillName, 'SKILL.md'), await readFile(source, 'utf8'), 'utf8')
+  }
   await execFileAsync(process.execPath, [cli, 'register', repoRoot], { env })
   await access(skillPath)
 
@@ -321,7 +325,9 @@ async function createFixture(root, mockBaseUrl) {
   })
   const discovered = JSON.parse(debug.stdout)
   assert.ok(Array.isArray(discovered))
-  assert.ok(discovered.some((skill) => skill?.name === SKILL_NAME), 'opencode debug skill did not discover skill-modification')
+  for (const skillName of SKILL_NAMES) {
+    assert.ok(discovered.some((skill) => skill?.name === skillName), `opencode debug skill did not discover ${skillName}`)
+  }
 
   const config = await readFile(join(configDir, 'opencode.jsonc'), 'utf8')
   assert.match(config, new RegExp(repoRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
@@ -427,7 +433,7 @@ async function runDiscoveryTest(context) {
     assert.ok(webSkills.probe, 'Web /skill did not return the registered probe')
     assert.equal(tuiSkills.probe.location, webSkills.probe.location, 'TUI and Web resolved different skill locations')
     assert.ok(
-      tuiSkills.probe.location.includes(`${context.fixture.repoRoot}/skills/${SKILL_NAME}`),
+      tuiSkills.probe.location.includes(`${context.fixture.repoRoot}/.apm/skills/${SKILL_NAME}`),
       `probe resolved outside migrated repo: ${tuiSkills.probe.location}`,
     )
     return { tui: tuiSkills, web: webSkills }

@@ -66,7 +66,8 @@ test("OpenCode runtime fixture covers init and explicit registration", () => {
   const fixture = functionBody("createFixture", "listProbe");
 
   assert.match(fixture, /\[cli, 'init', repoRoot\]/);
-  assert.match(fixture, /writeFile\(skillPath, skillContent/);
+  assert.match(fixture, /join\(repoRoot, '\.apm', 'skills', SKILL_NAME/);
+  assert.match(fixture, /SKILL_NAMES/);
   assert.match(fixture, /\[cli, 'register', repoRoot\]/);
   assert.doesNotMatch(fixture, /migration.*apply/);
 });
