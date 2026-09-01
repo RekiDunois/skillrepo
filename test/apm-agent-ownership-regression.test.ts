@@ -50,3 +50,30 @@ test('package unregister preserves symlinks into its source tree that skillrepo 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('package unregister preserves a pre-existing canonical projection that skillrepo reused but did not create', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-apm-agent-preexisting-'));
+  const repo = join(root, 'package-repo');
+  const source = join(repo, '.apm', 'agents', 'reviewer.agent.md');
+  const configDir = join(root, 'opencode');
+  const canonicalLink = join(configDir, 'agents', 'reviewer.md');
+
+  try {
+    await mkdir(join(repo, '.apm', 'agents'), { recursive: true });
+    await mkdir(join(configDir, 'agents'), { recursive: true });
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\n', 'utf8');
+    await writeFile(source, '---\ndescription: package agent\nmode: subagent\n---\n', 'utf8');
+    await symlink(source, canonicalLink);
+
+    await withConfigDir(configDir, async () => {
+      await registerRepo(repo);
+      assert.equal(await readlink(canonicalLink), source);
+
+      await unregisterRepo(repo);
+
+      assert.equal(await readlink(canonicalLink), source);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
