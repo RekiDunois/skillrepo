@@ -229,13 +229,22 @@ function standardSources(kind, configDir, projectRoot) {
   }
   return [
     join(projectRoot, '.opencode', 'agents'),
+    join(projectRoot, '.opencode', 'agent'),
+    join(projectRoot, '.opencode', 'modes'),
+    join(projectRoot, '.opencode', 'mode'),
     join(projectRoot, '.claude', 'agents'),
     join(configDir, 'agents'),
+    join(configDir, 'agent'),
+    join(configDir, 'modes'),
+    join(configDir, 'mode'),
     join(homedir(), '.claude', 'agents'),
+    join(homedir(), '.claude', 'agent'),
+    join(homedir(), '.claude', 'modes'),
+    join(homedir(), '.claude', 'mode'),
   ];
 }
 
-function resourceId(kind, sourceRoot, logicalPath) {
+function pathResourceId(kind, sourceRoot, logicalPath) {
   const value = relative(sourceRoot, logicalPath).split(sep).join('/');
   if (kind === 'skill') {
     if (value === 'SKILL.md') return basename(sourceRoot);
@@ -244,6 +253,15 @@ function resourceId(kind, sourceRoot, logicalPath) {
   }
   if (!value.endsWith('.md')) return null;
   return basename(value, '.md');
+}
+
+function resourceIds(kind, sourceRoot, logicalPath, metadataName) {
+  const pathId = pathResourceId(kind, sourceRoot, logicalPath);
+  if (!pathId) return [];
+  const v1Id = metadataName ?? (kind === 'skill'
+    ? basename(dirname(logicalPath))
+    : basename(pathId));
+  return [...new Set([v1Id, pathId])];
 }
 
 async function frontmatterName(path) {
@@ -301,16 +319,18 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
 
   for (const root of roots) {
     for (const file of await collectMarkdownFiles(root.path)) {
-      const id = resourceId(kind, root.path, file.logicalPath);
-      if (id !== name) continue;
+      const metadataName = await frontmatterName(file.path);
+      const identifiers = resourceIds(kind, root.path, file.logicalPath, metadataName);
+      if (!identifiers.includes(name)) continue;
       const sourceRelativePath = relative(root.path, file.logicalPath).split(sep).join('/');
       candidates.push({
         path: file.path,
-        id,
+        id: identifiers[0],
+        identifiers,
         sourceRelativePath,
         sourceRoot: await realpath(root.path),
         configuredSource: root.configured,
-        frontmatterName: await frontmatterName(file.path),
+        frontmatterName: metadataName,
         git: gitState(file.path),
       });
     }

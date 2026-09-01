@@ -93,6 +93,44 @@ test('rejects duplicate configured resources instead of guessing', async () => {
   }
 });
 
+test('preserves OpenCode V1 names and legacy agent roots', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-'));
+  const configDir = join(root, 'opencode');
+  const projectRoot = join(root, 'project');
+  const skillRoot = join(root, 'skills');
+  const projectAgent = join(projectRoot, '.opencode', 'agent');
+  const globalMode = join(configDir, 'mode');
+  try {
+    await mkdir(join(skillRoot, 'group', 'release'), { recursive: true });
+    await mkdir(projectAgent, { recursive: true });
+    await mkdir(globalMode, { recursive: true });
+    await mkdir(join(configDir, 'agents'), { recursive: true });
+    await writeFile(join(skillRoot, 'group', 'release', 'SKILL.md'), '---\nname: release\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(projectAgent, 'reviewer.md'), '---\ndescription: test\nmode: subagent\n---\n', 'utf8');
+    await writeFile(join(globalMode, 'planner.md'), '---\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(configDir, 'agents', 'worker.md'), '---\nname: renamed-worker\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), JSON.stringify({ skills: [skillRoot] }), 'utf8');
+
+    const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+    const skill = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'release', '--project-root', projectRoot], env)).stdout);
+    assert.equal(skill.path, await realpath(join(skillRoot, 'group', 'release', 'SKILL.md')));
+    assert.equal(skill.id, 'release');
+    assert.equal(skill.identifiers.includes('group/release'), true);
+
+    const reviewer = JSON.parse((await runLocator(['--kind', 'agent', '--name', 'reviewer', '--project-root', projectRoot], env)).stdout);
+    assert.equal(reviewer.path, await realpath(join(projectAgent, 'reviewer.md')));
+
+    const planner = JSON.parse((await runLocator(['--kind', 'agent', '--name', 'planner', '--project-root', projectRoot], env)).stdout);
+    assert.equal(planner.path, await realpath(join(globalMode, 'planner.md')));
+
+    const renamed = JSON.parse((await runLocator(['--kind', 'agent', '--name', 'renamed-worker', '--project-root', projectRoot], env)).stdout);
+    assert.equal(renamed.path, await realpath(join(configDir, 'agents', 'worker.md')));
+    assert.equal(renamed.identifiers.includes('worker'), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('uses an explicit config and reports missing resources', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skill-location-'));
   try {
