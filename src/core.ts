@@ -79,18 +79,48 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
+function isSkillUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function configuredSkillPaths(data: Record<string, unknown>): string[] {
+  const value = data.skills;
+  if (Array.isArray(value)) return stringArray(value).filter(path => !isSkillUrl(path));
+  if (value && typeof value === 'object') {
+    return stringArray((value as Record<string, unknown>).paths);
+  }
+  return [];
+}
+
+function configuredSkillUrls(data: Record<string, unknown>): string[] {
+  const value = data.skills;
+  if (Array.isArray(value)) return stringArray(value).filter(isSkillUrl);
+  if (value && typeof value === 'object') {
+    return stringArray((value as Record<string, unknown>).urls);
+  }
+  return [];
+}
+
 async function updateSkills(configPath: string, updater: (skills: string[]) => string[]): Promise<void> {
   const existed = await exists(configPath);
   const { text, data } = await readConfig(configPath);
-  const current = stringArray(data.skills);
+  const current = configuredSkillPaths(data);
+  const legacyArray = Array.isArray(data.skills);
+  const currentUrls = configuredSkillUrls(data);
   const next = updater(current);
 
-  if (current.length === next.length && current.every((value, index) => value === next[index])) return;
+  if (!legacyArray && current.length === next.length && current.every((value, index) => value === next[index])) return;
   if (!existed && next.length === 0) return;
 
-  const edits = modify(text, ['skills'], next, {
-    formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
-  });
+  // OpenCode 1.18 uses skills.paths; convert the old array form if present.
+  const edits = modify(
+    text,
+    legacyArray ? ['skills'] : ['skills', 'paths'],
+    legacyArray ? { paths: next, urls: currentUrls } : next,
+    {
+      formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
+    },
+  );
   await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, applyEdits(text, edits), 'utf8');
 }
@@ -222,7 +252,7 @@ async function registrationState(inventory: RepoInventory): Promise<Registration
   if (inventory.skillsDir) {
     const configPath = opencodeConfigFile();
     const { data } = await readConfig(configPath);
-    skillsRegistered = stringArray(data.skills).some(source => {
+    skillsRegistered = configuredSkillPaths(data).some(source => {
       return resolveConfigSource(source, configPath) === inventory.skillsDir;
     });
   }
@@ -252,7 +282,7 @@ async function staticCollisionIssues(inventory: RepoInventory): Promise<string[]
 
   if (inventory.skillsDir && inventory.skillIds.length) {
     const { data } = await readConfig(configPath);
-    for (const source of stringArray(data.skills)) {
+    for (const source of configuredSkillPaths(data)) {
       const resolved = resolveConfigSource(source, configPath);
       if (!resolved || resolved === inventory.skillsDir || !(await directoryExists(resolved))) continue;
       const existingIds = await collectSkillIds(resolved, false);
@@ -397,6 +427,25 @@ export function runOpenCode(args: string[], env = process.env): Promise<VerifyRe
   return run;
 }
 
+function parseDiscoveredSkillIds(output: string): Set<string> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return undefined;
+  }
+
+  if (!Array.isArray(parsed)) return undefined;
+
+  const ids = new Set<string>();
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    const name = (entry as Record<string, unknown>).name;
+    if (typeof name === 'string' && name.trim()) ids.add(name.trim());
+  }
+  return ids;
+}
+
 function containsIdentifier(output: string, id: string): boolean {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(^|[^A-Za-z0-9._/-])${escaped}($|[^A-Za-z0-9._/-])`, 'm').test(output);
@@ -409,7 +458,15 @@ function expectIdentifiers(
   kind: 'skill' | 'agent',
 ): VerifyResult {
   if (!result.ok) return result;
-  const wrong = ids.filter(id => containsIdentifier(result.stdout, id) !== shouldExist);
+  const discovered = kind === 'skill' ? parseDiscoveredSkillIds(result.stdout) : undefined;
+  if (kind === 'skill' && !discovered) {
+    return {
+      ...result,
+      ok: false,
+      stderr: `${result.stderr}${result.stderr ? '\n' : ''}OpenCode skill discovery output is not valid JSON`,
+    };
+  }
+  const wrong = ids.filter(id => (discovered ? discovered.has(id) : containsIdentifier(result.stdout, id)) !== shouldExist);
   if (!wrong.length) return result;
 
   const expectation = shouldExist ? 'missing' : 'still visible';
@@ -452,8 +509,10 @@ export async function assertNoRuntimeCollisions(inventory: RepoInventory): Promi
 
   const collisions: string[] = [];
   if (skillProbe) {
+    const discovered = parseDiscoveredSkillIds(skillProbe.stdout);
+    if (!discovered) throw new Error('OpenCode skill discovery output is not valid JSON');
     for (const id of skillIds) {
-      if (containsIdentifier(skillProbe.stdout, id)) collisions.push(`Skill ID '${id}' is already visible in OpenCode`);
+      if (discovered.has(id)) collisions.push(`Skill ID '${id}' is already visible in OpenCode`);
     }
   }
   if (agentProbe) {
@@ -488,21 +547,25 @@ export async function verifyOpenCode(): Promise<VerifyResult[]> {
   ]);
 }
 
-async function doctorStaticIssues(): Promise<string[]> {
+async function doctorStaticChecks(): Promise<{ issues: string[]; skillIds: string[] }> {
   const issues: string[] = [];
+  const configuredSkillIds = new Set<string>();
   let configPath: string;
 
   try {
     configPath = opencodeConfigFile();
   } catch (error) {
-    return [error instanceof Error ? error.message : String(error)];
+    return {
+      issues: [error instanceof Error ? error.message : String(error)],
+      skillIds: [],
+    };
   }
 
   try {
     const { data } = await readConfig(configPath);
     const seenSkills = new Map<string, string>();
 
-    for (const source of stringArray(data.skills)) {
+    for (const source of configuredSkillPaths(data)) {
       const resolved = resolveConfigSource(source, configPath);
       if (!resolved) continue;
       if (!(await directoryExists(resolved))) {
@@ -511,6 +574,7 @@ async function doctorStaticIssues(): Promise<string[]> {
       }
 
       for (const id of await collectSkillIds(resolved, false)) {
+        configuredSkillIds.add(id);
         const previous = seenSkills.get(id);
         if (previous && previous !== source) issues.push(`Duplicate skill ID '${id}': ${previous} and ${source}`);
         else seenSkills.set(id, source);
@@ -560,15 +624,26 @@ async function doctorStaticIssues(): Promise<string[]> {
     }
   }
 
-  return issues;
+  return { issues, skillIds: [...configuredSkillIds] };
 }
 
 export async function doctor(): Promise<{ ok: boolean; issues: string[]; verification: VerifyResult[] }> {
-  const issues = await doctorStaticIssues();
+  const staticChecks = await doctorStaticChecks();
+  const issues = staticChecks.issues;
   const verification = await verifyOpenCode();
   for (const result of verification) {
     if (!result.ok) {
       issues.push(`OpenCode verification failed: ${result.command}: ${result.stderr.trim() || 'non-zero exit'}`);
+    }
+  }
+
+  const skillProbe = verification.find(result => result.command === 'opencode debug skill');
+  if (skillProbe?.ok && staticChecks.skillIds.length) {
+    const discovered = parseDiscoveredSkillIds(skillProbe.stdout);
+    if (!discovered) issues.push('OpenCode skill discovery output is not valid JSON');
+    else {
+      const missing = staticChecks.skillIds.filter(id => !discovered.has(id));
+      if (missing.length) issues.push(`OpenCode discovery missing configured skill IDs: ${missing.join(', ')}`);
     }
   }
   return { ok: issues.length === 0, issues, verification };

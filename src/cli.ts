@@ -11,10 +11,16 @@ import {
   verifyRepoUnregistered,
   type VerifyResult,
 } from './core.js';
+import { renderMigrationAudit } from './audit.js';
+import { applyMigrationIgnores, renderMigrationIgnore } from './ignore.js';
 import { applyMigration } from './migration.js';
+import { classifyMigrationPortability, renderMigrationPortability } from './portability.js';
+import { applyMigrationPortabilityFixes, renderMigrationPortabilityFix } from './portability_fix.js';
+import { auditMigrationCommitReadiness } from './readiness.js';
+import { execRegisteredResource, installedSkillrepoSupportsExec } from './runtime.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]`);
+  console.error(`Usage:\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
   process.exit(2);
 }
 
@@ -35,6 +41,14 @@ function printVerification(results: VerifyResult[]): boolean {
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   if (!command) usage();
+
+  if (command === 'exec') {
+    if (rest.length < 2) usage();
+    const [repoId, resource, ...args] = rest;
+    const code = await execRegisteredResource({ repoId: repoId!, resource: resource!, args });
+    process.exitCode = code;
+    return;
+  }
 
   if (command === 'register' || command === 'unregister') {
     const { values, positionals } = parseArgs({
@@ -79,6 +93,119 @@ async function main(): Promise<void> {
 
   if (command === 'migration') {
     const [subcommand, ...migrationArgs] = rest;
+
+    if (subcommand === 'audit') {
+      const { values, positionals } = parseArgs({
+        args: migrationArgs,
+        allowPositionals: true,
+        allowNegative: true,
+        options: {
+          plan: { type: 'string', default: 'migration-plan.json' },
+          'target-root': { type: 'string' },
+          git: { type: 'string', default: 'git' },
+          json: { type: 'boolean', default: false },
+        },
+      });
+      if (positionals.length || !values['target-root']) usage();
+
+      const result = await auditMigrationCommitReadiness({
+        planPath: values.plan!,
+        targetRoot: values['target-root'],
+        gitPath: values.git!,
+      });
+      console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationAudit(result));
+      return;
+    }
+
+    if (subcommand === 'ignore') {
+      const { values, positionals } = parseArgs({
+        args: migrationArgs,
+        allowPositionals: true,
+        allowNegative: true,
+        options: {
+          plan: { type: 'string', default: 'migration-plan.json' },
+          'target-root': { type: 'string' },
+          git: { type: 'string', default: 'git' },
+          execute: { type: 'boolean', default: false },
+        },
+      });
+      if (positionals.length || !values['target-root']) usage();
+
+      const result = await applyMigrationIgnores({
+        planPath: values.plan!,
+        targetRoot: values['target-root'],
+        gitPath: values.git!,
+        dryRun: !values.execute,
+      });
+      console.log(renderMigrationIgnore(result));
+      return;
+    }
+
+    if (subcommand === 'portability') {
+      const [portabilitySubcommand, ...portabilityArgs] = migrationArgs;
+      if (portabilitySubcommand === 'fix') {
+        const { values, positionals } = parseArgs({
+          args: portabilityArgs,
+          allowPositionals: true,
+          allowNegative: true,
+          options: {
+            plan: { type: 'string', default: 'migration-plan.json' },
+            'target-root': { type: 'string' },
+            git: { type: 'string', default: 'git' },
+            execute: { type: 'boolean', default: false },
+            json: { type: 'boolean', default: false },
+          },
+        });
+        if (positionals.length || !values['target-root']) usage();
+
+        const preview = await applyMigrationPortabilityFixes({
+          planPath: values.plan!,
+          targetRoot: values['target-root'],
+          gitPath: values.git!,
+          dryRun: true,
+        });
+        let result = preview;
+        if (values.execute) {
+          const needsRuntimeExec = preview.files.some(file => file.actions.some(action => action.kind === 'AUTO-REPO-EXEC'));
+          if (needsRuntimeExec && !(await installedSkillrepoSupportsExec())) {
+            throw new Error(
+              'Portability fix requires the current skillrepo CLI installed on PATH before rewriting MCP commands. '
+              + 'Install this package globally, then re-run the same command.',
+            );
+          }
+          result = await applyMigrationPortabilityFixes({
+            planPath: values.plan!,
+            targetRoot: values['target-root'],
+            gitPath: values.git!,
+            dryRun: false,
+          });
+        }
+        console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationPortabilityFix(result));
+        return;
+      }
+
+      const { values, positionals } = parseArgs({
+        args: migrationArgs,
+        allowPositionals: true,
+        allowNegative: true,
+        options: {
+          plan: { type: 'string', default: 'migration-plan.json' },
+          'target-root': { type: 'string' },
+          git: { type: 'string', default: 'git' },
+          json: { type: 'boolean', default: false },
+        },
+      });
+      if (positionals.length || !values['target-root']) usage();
+
+      const result = await classifyMigrationPortability({
+        planPath: values.plan!,
+        targetRoot: values['target-root'],
+        gitPath: values.git!,
+      });
+      console.log(values.json ? JSON.stringify(result, null, 2) : renderMigrationPortability(result));
+      return;
+    }
+
     if (subcommand !== 'apply') usage();
 
     const { values, positionals } = parseArgs({
