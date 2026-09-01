@@ -1,10 +1,42 @@
-import { access, lstat, readFile, readlink, realpath, stat } from 'node:fs/promises';
+import { access, lstat, mkdtemp, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parse, type ParseError } from 'jsonc-parser';
 import { opencodeConfigDir, opencodeConfigFile } from './core.js';
+
+export type RuntimeVerificationPhase = 'canary-runtime-verification' | 'final-runtime-verification';
+
+export type RuntimeSkillExpectation = {
+  id: string;
+  source: string;
+  target: string;
+  marker: string;
+};
+
+export type RuntimeVerificationContext = {
+  phase: RuntimeVerificationPhase;
+  transactionId: string;
+  projectDir: string;
+  configPath: string;
+  configFingerprint: string;
+  skillSources: string[];
+  agentLinks: Array<{ path: string; target: string }>;
+  expectedSkillIds: string[];
+  expectedAgentNames: string[];
+  skills: RuntimeSkillExpectation[];
+};
+
+export type RuntimeVerificationResult = {
+  ok: boolean;
+  phase: RuntimeVerificationPhase;
+  checks: Array<{ ok: boolean; command: string; stdout: string; stderr: string }>;
+  diagnostics: Record<string, unknown>;
+};
+
+export type RuntimeVerifier = (context: RuntimeVerificationContext) => Promise<RuntimeVerificationResult>;
 
 function validateRepoId(id: string): string {
   const value = id.trim();
@@ -182,4 +214,73 @@ export async function installedSkillrepoSupportsExec(
     child.once('error', () => finish(false));
     child.once('close', () => finish(stderr.includes('skillrepo exec <repo-id> <repo-relative-resource>')));
   });
+}
+
+/**
+ * Run the external verifier in a child process so OpenCode's worker lifecycle
+ * cannot interfere with the migration process or its rollback handlers.
+ */
+export async function verifyOpenCodeRuntime(
+  context: RuntimeVerificationContext,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<RuntimeVerificationResult> {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), 'skillrepo-runtime-verification-'));
+  const inputPath = join(temporaryRoot, 'request.json');
+  const helperPath = resolve(dirname(fileURLToPath(import.meta.url)), '../../scripts/opencode-runtime-verify.mjs');
+  try {
+    await writeFile(inputPath, `${JSON.stringify(context)}\n`, { encoding: 'utf8', mode: 0o600 });
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, reject) => {
+      const child = spawn(process.execPath, [helperPath, inputPath], {
+        cwd: context.projectDir,
+        env,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', data => stdout += data);
+      child.stderr.on('data', data => stderr += data);
+      child.once('error', reject);
+      child.once('close', code => resolvePromise({ code, stdout, stderr }));
+    });
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      return {
+        ok: false,
+        phase: context.phase,
+        checks: [{ ok: false, command: 'opencode runtime verifier', stdout: result.stdout, stderr: result.stderr }],
+        diagnostics: { verifierError: 'runtime verifier returned invalid JSON', verifierStderr: result.stderr },
+      };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {
+        ok: false,
+        phase: context.phase,
+        checks: [{ ok: false, command: 'opencode runtime verifier', stdout: result.stdout, stderr: result.stderr }],
+        diagnostics: { verifierError: 'runtime verifier returned a non-object result', verifierStderr: result.stderr },
+      };
+    }
+    const value = parsed as Partial<RuntimeVerificationResult>;
+    if (value.phase !== context.phase || typeof value.ok !== 'boolean' || !Array.isArray(value.checks)) {
+      return {
+        ok: false,
+        phase: context.phase,
+        checks: [{ ok: false, command: 'opencode runtime verifier', stdout: result.stdout, stderr: result.stderr }],
+        diagnostics: { verifierError: 'runtime verifier returned an invalid result shape', verifierStderr: result.stderr },
+      };
+    }
+    return {
+      ok: value.ok,
+      phase: context.phase,
+      checks: value.checks as RuntimeVerificationResult['checks'],
+      diagnostics: value.diagnostics && typeof value.diagnostics === 'object' && !Array.isArray(value.diagnostics)
+        ? value.diagnostics as Record<string, unknown>
+        : { verifierStderr: result.stderr },
+    };
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
 }

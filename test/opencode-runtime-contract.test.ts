@@ -7,6 +7,10 @@ const runtimeScript = fs.readFileSync(
   path.join(process.cwd(), "scripts", "opencode-runtime-test.mjs"),
   "utf8",
 );
+const migrationRuntimeScript = fs.readFileSync(
+  path.join(process.cwd(), "scripts", "opencode-runtime-verify.mjs"),
+  "utf8",
+);
 
 function functionBody(name: string, nextName: string): string {
   const start = runtimeScript.search(new RegExp(`(?:async\\s+)?function\\s+${name}\\b`));
@@ -37,4 +41,11 @@ test("OpenCode runtime parity probe must load the registered skill inside the mo
     /EXPECTED_RAW_SKILL_CONTENT_MARKER/,
     "the runtime session must verify that the completed skill-tool result contains the fixture's unique content marker",
   );
+});
+
+test("runtime verification uses serve instead of opening the default browser", () => {
+  assert.match(runtimeScript, /\[context\.executable, 'serve',/);
+  assert.doesNotMatch(runtimeScript, /\[context\.executable, 'web',/);
+  assert.match(migrationRuntimeScript, /\[executable, 'serve',/);
+  assert.doesNotMatch(migrationRuntimeScript, /\[executable, 'web',/);
 });
