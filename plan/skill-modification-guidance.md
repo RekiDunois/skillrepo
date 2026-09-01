@@ -25,7 +25,7 @@
 ## 目标
 
 1. 新增一个 OpenCode 可发现、可加载的 skill，建议稳定 ID 为 `skill-modification`。
-2. 用户提出“修改 skill”“编辑 skill”“改一下这个 skill”等意图时，description 能让 OpenCode 优先加载该 skill。
+2. 用户提出“修改 skill”“编辑 skill”“改一下这个 skill”等意图时，description 会随 skill 元数据展示给模型，并通过 runtime 测试验证可被正确使用。
 3. 修改前始终使用现有 locator 找到唯一真实 `SKILL.md`，不允许通过猜测路径选文件。
 4. 明确区分真实 Git 源、迁移目标、旧兼容壳、symlink 和缓存文件。
 5. 在迁移事务成功提交并完成 OpenCode discovery 验证后，输出可直接交给 agent 使用的修改模板。
@@ -84,16 +84,18 @@ description 应明确包含中英文常见意图，例如“修改 skill”“�
 
 加载后第一步固定为运行 `pwd`，并原样保留返回路径。随后加载并遵循 `skill-development-location`，使用它提供的 locator，而不是自行拼接配置路径。
 
+locator 的当前 JSON 契约必须按现有实现消费：配置文件路径是顶层 `config`，Git 状态位于 `git` 对象中，Git 根目录是 `git.gitRoot`。本计划不新增兼容 alias，也不把这些字段重命名为 `configPath` 或顶层 `gitRoot`。
+
 定位规则必须明确：
 
 1. 配置优先级遵循 `OPENCODE_CONFIG`、`OPENCODE_CONFIG_DIR/opencode.jsonc`、`OPENCODE_CONFIG_DIR/opencode.json` 和默认配置位置。
 2. `opencode.json` 与 `opencode.jsonc` 同时存在时停止并请求用户明确选择。
 3. 使用用户给出的明确 skill ID；没有明确 ID 时先询问，不用模糊匹配替代确认。
-4. 使用 locator 返回的真实 `path`、`sourceRoot`、`gitRoot`、`configPath` 和 Git 状态。
+4. 使用 locator 返回的真实 `path`、`sourceRoot`、`sourceRelativePath`、`config`、`frontmatterName` 和 Git 状态；Git 根目录读取 `git.gitRoot`，并检查 `git.managed`。
 5. locator 返回 missing 或 ambiguous 时停止修改并报告原因。
 6. 若返回的 `path` 位于 symlink、兼容壳、缓存或 OpenCode 生成镜像中，停止并重新定位 Git 源。
 
-定位结果应作为本次任务的唯一资源身份。迁移计划、旧路径和目录名只能用于辅助解释，不能覆盖 locator 的结果。
+定位结果应作为本次任务的唯一资源身份。迁移计划、旧路径和目录名只能用于辅助解释，不能覆盖 locator 的结果。若未来需要 `configPath` 或顶层 `gitRoot` alias，应先单独修改 locator 并补充旧字段兼容测试；本计划的实现直接使用现有 `config` / `git.gitRoot` 契约。
 
 ### 3. 修改前的 Git 安全检查
 
@@ -131,7 +133,7 @@ git log --oneline -10
 2. 检查 frontmatter 能被 OpenCode 兼容 parser 解析，且 `name` 与预期 skill ID 一致。
 3. 运行目标仓库文档规定的 focused test，再运行必要的完整测试。
 4. 运行 `skillrepo doctor` 或等价的注册状态检查，确认 source linkage 没有断裂。
-5. 运行 `opencode debug skill <skill-id>`，确认 discovery 能看到目标 skill。
+5. 运行 `opencode debug skill`，解析 JSON 列表并按目标 skill ID 检查 discovery 结果；该命令不接 skill ID 参数。
 6. 若修改了 agent 或 agent 相关资源，额外运行 `opencode agent list` 并检查名称无重复。
 7. 对会影响模型读取行为的修改运行 `npm run test:opencode-runtime` 或仓库等价的真实 `skill()` runtime 测试。
 8. 报告测试结果、实际编辑路径、Git 根和仍需人工确认的项目。
@@ -148,7 +150,7 @@ git log --oneline -10
 - 事务状态为 `committed`。
 - 目标内容、兼容链接、agent 注册链接和 OpenCode 配置已完成。
 - 独立 OpenCode discovery 验证通过。
-- 迁移结果中的 skill 操作可以直接提供目标仓库内的 `SKILL.md` target path。
+- 迁移结果中的持久化 `skillMappings` 可以直接提供每个 discovered skill 的目标仓库内 `SKILL.md` target path。
 
 以下状态不输出“可编辑成功”模板：
 
@@ -172,10 +174,26 @@ SKILL_MODIFICATION_HANDOFF_BEGIN
 SKILL_MODIFICATION_HANDOFF_END
 ```
 
-模板内容只填充迁移结果和已验证状态中的事实，不重新扫描并猜测路径。每个迁移后的 skill 输出一个独立条目，至少包括：
+模板内容只填充迁移结果和已验证状态中的事实，不重新扫描并猜测路径。每个 discovered skill 输出一个独立条目，不能把一个目录级 move operation 当成只有一个 skill。迁移支持一个 skill 目录包含根级和嵌套的多个 `SKILL.md`，因此 preflight 必须生成并持久化完整的 `skillMappings`：
+
+```ts
+type SkillMapping = {
+  operationId?: string;
+  repoId: string;
+  skillId: string;
+  sourceFile: string;
+  targetFile: string;
+};
+```
+
+`skillMappings` 应由 `collectSkillIdsInTree()` 的每个 `{ path, id }` 直接计算：`targetFile` 是 move target 加上该文件相对 skill source directory 的路径。根级 `SKILL.md`、嵌套 `SKILL.md`、frontmatter `name` 和目录路径不能相互推断替代。它必须进入事务 journal/result，供新事务、resume 和 committed handoff 统一消费；`expectedSkillIds` 继续用于 discovery 集合校验，但不能替代文件级映射。
+
+`operationId` 可以在 journal 创建时绑定到对应 move operation；在此之前 mapping 的 `repoId`、`sourceFile` 和 `targetFile` 必须已经唯一确定。任何旧 journal 若没有文件级映射，都必须经过显式、可验证的 schema 迁移，否则不能生成完整 handoff。
+
+模板每个 mapping 至少包括：
 
 - `skill_id`：预检和最终 discovery 使用的稳定 ID。
-- `skill_file`：迁移 operation 提供的目标仓库内真实 `SKILL.md` 路径；不从 skill ID 反推目录名。
+- `skill_file`：`skillMappings.targetFile` 提供的目标仓库内真实 `SKILL.md` 路径；不从 skill ID 反推目录名。
 - `repo_id`：迁移计划和注册结果中的仓库 ID。
 - `repo_root`：目标仓库路径。
 - `config_path`：本次事务实际使用的 OpenCode 配置路径。
@@ -210,7 +228,7 @@ SKILL_MODIFICATION_HANDOFF_END
 
 1. 重新解析 frontmatter，保持稳定 `name`；不要假设 `name` 等于目录名。
 2. 运行目标仓库测试。
-3. 运行 `opencode debug skill <skill-id>`。
+3. 运行 `opencode debug skill`，再按 skill ID 解析列表结果。
 4. 对行为变化运行真实 `skill()` runtime 测试。
 ```
 
@@ -240,12 +258,12 @@ skill 本身不硬编码当前机器的绝对路径。它只引用已加载的 `
 如果选择将模板集成到迁移命令，新增一个小型渲染模块，例如 `src/skill_modification_template.ts`，职责仅限于：
 
 - 接收已提交事务的明确结果。
-- 按 skill move operation 生成稳定条目。
+- 按持久化的 `skillMappings` 生成每个 root/nested skill 的稳定条目。
 - 对路径和文本做 Markdown 安全转义。
 - 拒绝 dry-run、未提交或验证失败状态。
 - 不读取或输出 journal 中不必要的原始配置内容。
 
-不应让渲染器再次遍历用户目录或通过目录名反推 skill。配置路径应来自事务 journal/result，skill 文件应来自已验证的 move mapping。
+不应让渲染器再次遍历用户目录或通过目录名反推 skill。配置路径应来自事务 journal/result，skill 文件应来自已验证的文件级 `skillMappings`。由于 journal 是 resume 的持久化输入，需要为新增字段制定 journal schema 版本或对 skillrepo 自有旧 journal 做明确、可验证的迁移；缺少文件级映射时不能静默生成不完整 handoff。
 
 ### C. 迁移 CLI 集成
 
@@ -257,18 +275,19 @@ skill 本身不硬编码当前机器的绝对路径。它只引用已加载的 `
 4. `--no-verify` 时最多输出带“未经过 OpenCode discovery 验证”警告的降级 handoff，不输出完整成功模板，也不能把未验证结果伪装成完全成功。
 5. 对没有 skill move 的事务输出“不生成 skill 修改模板”的明确说明。
 
-必要时扩展 `MigrationApplyResult`，只增加模板所需的结构化事实，例如 `configPath` 和明确的 skill mappings，不把完整 journal 或敏感原始配置暴露给 CLI 输出。
+必要时扩展 `MigrationApplyResult`，只增加模板所需的结构化事实，例如事务配置路径和明确的 `skillMappings`，不把完整 journal 或敏感原始配置暴露给 CLI 输出。迁移 journal 同步保存 `skillMappings`，并通过 schema 版本或受限的旧 journal 迁移保持 resume 行为可验证。
 
-### D. OpenCode 解析验证
+### D. OpenCode 解析与模型可见性验证
 
 如果该仓库的迁移计划会把新 skill 纳入某个 skill repo，必须在迁移成功后用真实 OpenCode 检查：
 
-- `opencode debug skill skill-modification` 能发现它。
+- `opencode debug skill` 的 JSON 列表中能发现 `skill-modification`，并按 ID 解析结果，不给该命令传入 skill ID。
 - skill ID 没有与现有资源重复。
 - `SKILL.md` 的 frontmatter 被正确解析。
-- 模型会话中内置 `skill()` 工具能加载该 skill，并返回一个唯一正文标记。
+- 模型请求中实际包含 `skill-modification` 的 description/advertisement 信息。
+- 在 advertisement 断言通过后，模型会话中内置 `skill()` 工具能加载该 skill，并返回一个唯一正文标记。
 
-验证应复用现有 `scripts/opencode-runtime-test.mjs` 的 deterministic provider 思路，不用开发者本机真实模型结果作为唯一依据。
+验证应复用现有 `scripts/opencode-runtime-test.mjs` 的 deterministic provider 思路，不用开发者本机真实模型结果作为唯一依据。测试可以控制 mock 的 tool call，但不能据此声称 OpenCode 自己完成了“根据用户意图选择 skill”；它只能证明 skill 元数据被广告给模型，且真实 `skill()` 执行成功。
 
 ## 测试计划
 
@@ -282,17 +301,28 @@ skill 本身不硬编码当前机器的绝对路径。它只引用已加载的 `
 4. 文档明确要求加载 locator、拒绝 ambiguity、禁止编辑兼容壳。
 5. 文档不包含开发者本机绝对路径、凭据样例或真实用户目录。
 
+同时补充 locator contract 测试，按当前输出字段断言：
+
+```ts
+assert.equal(found.config, configPath);
+assert.equal(found.git.gitRoot, await realpath(repoRoot));
+assert.equal(found.git.managed, true);
+```
+
+测试不得断言不存在的顶层 `configPath` 或 `gitRoot` alias。若以后决定增加 alias，必须先修改 locator、保留现有字段并单独覆盖兼容行为。
+
 ### 模板渲染测试
 
 新增渲染器 focused tests，覆盖：
 
-1. committed 且验证通过时，为每个 skill mapping 输出一个条目。
+1. committed 且验证通过时，为每个 `skillMappings` 条目输出一个条目。
 2. dry-run、preflight-failed、moved-uncommitted 和 rollback 状态不输出成功模板。
 3. agent/lib-only 事务不生成 skill 条目。
-4. 输出使用迁移结果中的 target/config path，不从旧路径猜测。
-5. Markdown 特殊字符和路径空格不会破坏模板。
-6. `--template-out` 不覆盖已存在文件，且写入失败不会改变迁移结果。
-7. 输出不泄露完整原始 JSONC、secret-like 值、cookie 或 journal 私密内容。
+4. 根级和嵌套 `SKILL.md` 都有准确的 `skillId`、`sourceFile` 和 `targetFile`，输出使用文件级映射而不是目录级 operation 或 ID 反推。
+5. 输出使用迁移结果中的 target/config path，不从旧路径猜测。
+6. Markdown 特殊字符和路径空格不会破坏模板。
+7. `--template-out` 不覆盖已存在文件，且写入失败不会改变迁移结果。
+8. 输出不泄露完整原始 JSONC、secret-like 值、cookie 或 journal 私密内容。
 
 ### 迁移回归测试
 
@@ -303,10 +333,11 @@ skill 本身不硬编码当前机器的绝对路径。它只引用已加载的 `
 3. committed journal 的 `--resume` 验证成功时，模板可以幂等重现。
 4. migration plan 只含 HOLD/DEFER 或没有 skill 时，模板状态明确而不是空白成功。
 5. 事务期间配置被外部修改时，不生成模板，也不覆盖配置。
+6. 一个 skill 目录包含根级和嵌套 `SKILL.md` 时，`skillMappings` 为每个 discovered skill 保存准确文件路径，且 handoff 不遗漏嵌套 skill。
 
 ### 真实 OpenCode runtime 测试
 
-运行：
+使用 CI 固定的 `opencode-ai@1.18.25`（或 `OPENCODE_BIN` 指定的同等测试二进制）运行：
 
 ```bash
 npm test
@@ -316,17 +347,17 @@ npm run test:opencode-runtime
 并在已注册的测试 fixture 上执行：
 
 ```bash
-opencode debug skill skill-modification
+opencode debug skill
 ```
 
-测试必须确认模型会话实际调用 OpenCode 内置 `skill()` 工具并取得新 skill 的正文标记，而不是只确认 debug 命令返回 0。
+测试必须先解析 `opencode debug skill` 的 JSON 列表并按 ID 找到目标 skill，而不是给命令传入 skill ID，也不能只确认 exit code。runtime mock 的第一轮请求必须包含用户的“修改 skill”请求、`skill-modification` ID 和 description/advertisement 文本；只有 advertisement 断言通过后才返回 `skill()` tool call。随后保留第二轮正文 marker 断言，确认真实 `skill()` 工具执行成功。该测试证明的是元数据进入 model-facing advertisement 和工具可执行，不把模型的选择行为错误归因于 OpenCode。
 
 ## 验收标准
 
-- 用户说“修改 skill”时，OpenCode 能通过稳定 description 选择 `skill-modification`，且真实 runtime 能加载它。
+- 用户说“修改 skill”时，OpenCode 会向模型广告 `skill-modification` 的稳定 description，且真实 runtime 能加载它；模型是否选择调用由模型行为决定，不将其归因于 OpenCode 自身。
 - agent 不会凭旧路径或目录名编辑迁移兼容壳。
 - 配置冲突、资源缺失、路径歧义和非 Git 源都会停止并给出原因。
-- 修改流程使用 locator 的真实 `path`、`sourceRoot`、`gitRoot` 和 `configPath`。
+- 修改流程使用 locator 的真实 `path`、`sourceRoot`、`sourceRelativePath`、`config` 和 `git.gitRoot`，并检查 `git.managed`。
 - migration 只有在 `committed` 且 discovery 验证完成后才输出成功 handoff。
 - handoff 中每个 skill 的路径来自事务映射，静态模板不含真实本机路径。
 - 模板输出可供后续 agent 直接执行，不要求 agent 重新猜测配置文件或目标仓库。
@@ -346,5 +377,5 @@ opencode debug skill skill-modification
 
 - 默认只 stdout 输出模板，还是同时提供显式 `--template-out`：建议两者都支持，但文件输出必须 opt-in 且 no-clobber。
 - `--no-verify` 是否输出降级模板：建议输出带“未验证”警告的模板，不能输出完全成功标记。
-- 是否把 `configPath`、`gitRoot` 直接加入 `MigrationApplyResult`：建议只加入模板真正需要且不会泄露额外 journal 内容的字段。
+- 是否把事务配置路径和 `skillMappings` 直接加入 `MigrationApplyResult`：建议只加入模板真正需要且不会泄露额外 journal 内容的字段；locator 仍使用现有的 `config` / `git.gitRoot` 字段。
 - 新 skill 是否随 skillrepo 自身注册，还是由下一次迁移计划纳入目标 skill repo：实现时必须选择一种实际安装路径，并用真实 OpenCode discovery 验证，不能只在源树中测试。
