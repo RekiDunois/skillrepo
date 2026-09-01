@@ -16,7 +16,7 @@ npm run build
 npm install -g .
 ```
 
-Register the checkout with OpenCode. This adds its `skills/` directory to OpenCode's skill sources and links its `agents/` directory:
+Register the checkout with OpenCode. This adds its `skills/` directory to OpenCode's skill sources and creates an OpenCode agent link only when the checkout has an `agents/` directory:
 
 ```bash
 skillrepo register "$(pwd)"
