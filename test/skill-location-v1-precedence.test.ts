@@ -14,6 +14,12 @@ async function runLocator(args: string[], env: NodeJS.ProcessEnv): Promise<{ std
   return await execFileAsync(process.execPath, [locator, ...args], { env, encoding: 'utf8' });
 }
 
+function locatorFailure(error: unknown): error is { code: number; stderr: string } {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { code?: unknown; stderr?: unknown };
+  return candidate.code === 1 && typeof candidate.stderr === 'string';
+}
+
 test('prefers OpenCode V1 primary names over path-derived compatibility aliases', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skill-location-v1-'));
   const configDir = join(root, 'opencode');
@@ -90,6 +96,81 @@ test('discovers V1 ancestor .opencode and .agents skill roots from pwd', async (
       '--project-root', cwd,
     ], env)).stdout);
     assert.equal(skill.path, await realpath(ancestorSkill));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('discovers global OpenCode V1 .agents skills', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-v1-'));
+  const home = join(root, 'home');
+  const configDir = join(root, 'opencode');
+  const projectRoot = join(root, 'project');
+  const skill = join(home, '.agents', 'skills', 'global-agent-skill', 'SKILL.md');
+  try {
+    await mkdir(dirname(skill), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projectRoot, { recursive: true });
+    await writeFile(skill, '---\nname: global-agent-skill\ndescription: V1 global agent skill\n---\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), '{}\n', 'utf8');
+
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      OPENCODE_CONFIG_DIR: configDir,
+    };
+    const found = JSON.parse((await runLocator([
+      '--kind', 'skill',
+      '--name', 'global-agent-skill',
+      '--project-root', projectRoot,
+    ], env)).stdout);
+    assert.equal(found.path, await realpath(skill));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('does not treat Claude agent directories as OpenCode V1 agent roots', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-v1-'));
+  const configDir = join(root, 'opencode');
+  const projectRoot = join(root, 'project');
+  const ghostAgent = join(projectRoot, '.claude', 'agents', 'ghost.md');
+  try {
+    await mkdir(dirname(ghostAgent), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await execFileAsync('git', ['init', '-q', projectRoot]);
+    await writeFile(ghostAgent, '---\ndescription: Claude-only agent\n---\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), '{}\n', 'utf8');
+
+    const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+    await assert.rejects(
+      () => runLocator(['--kind', 'agent', '--name', 'ghost', '--project-root', projectRoot], env),
+      error => locatorFailure(error) && error.stderr.includes('resource not found'),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('does not return a nameless skill that OpenCode V1 ignores', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-v1-'));
+  const configDir = join(root, 'opencode');
+  const projectRoot = join(root, 'project');
+  const skillRoot = join(root, 'skills');
+  const invalidSkill = join(skillRoot, 'nameless', 'SKILL.md');
+  try {
+    await mkdir(dirname(invalidSkill), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await mkdir(projectRoot, { recursive: true });
+    await writeFile(invalidSkill, '---\ndescription: missing V1 name\n---\n', 'utf8');
+    await writeFile(join(configDir, 'opencode.jsonc'), JSON.stringify({ skills: { paths: [skillRoot] } }), 'utf8');
+
+    const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+    await assert.rejects(
+      () => runLocator(['--kind', 'skill', '--name', 'nameless', '--project-root', projectRoot], env),
+      error => locatorFailure(error) && error.stderr.includes('resource not found'),
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
