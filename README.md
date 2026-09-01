@@ -127,7 +127,7 @@ skillrepo migration portability \
   --target-root ~/skill-repos
 ```
 
-Absolute home-path findings are classified by scope: frontmatter runtime configuration, Markdown body, tests, or runtime code. Mixed Markdown files preserve separate frontmatter/body segments so later fixes do not treat the whole file as runtime configuration. Unix home paths and Windows home paths using either `C:\Users\name\...` or `C:/Users/name/...` separators are recognized.
+Absolute home-path findings are classified by scope: frontmatter runtime configuration, Markdown body, tests, or runtime code. Mixed Markdown files preserve separate frontmatter/body segments so later fixes do not treat the whole file as runtime configuration. Unix home paths and Windows home paths using either `C:\\Users\\name\\...` or `C:/Users/name/...` separators are recognized.
 
 ### Portability fixes
 
@@ -158,3 +158,14 @@ npm test
 ```
 
 GitHub Actions runs the full unit suite plus packaged CLI/OpenCode integration on Ubuntu. A separate Windows job builds the project and runs the commit-readiness/Git-ignore unit subset, including the target-filesystem `core.ignoreCase` regression, so the filesystem-sensitive Windows branch is exercised without claiming that unrelated POSIX symlink/runtime tests are Windows-portable.
+
+## Skill and agent development
+
+The `skill-development-location` skill defines the safe workflow for changing an OpenCode skill or agent that may be stored outside the default config directory. Load it before development; its locator reads the configured source paths and returns the unique real file path, source root, and Git state:
+
+```bash
+node skills/skill-development-location/scripts/locate-resource.mjs \
+  --kind skill --name <skill-name>
+```
+
+It also documents parallel work ownership, Conventional Commit rules, staged-diff checks, and the push/PR handoff.
