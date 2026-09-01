@@ -332,6 +332,64 @@ test('rollback recovers across stable-agent atomic publish boundaries', { skip: 
   }
 });
 
+test('rollback recovers after rewrite temp creation before identity persist', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'agent-rewrite-temp-created-before-identity');
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-complete/,
+      );
+    });
+    assert.equal(
+      await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
+      '---\ndescription: test\nmode: subagent\n---\nworker\n',
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('rollback resumes after restore temp creation before identity persist', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'config-written');
+    await runCrash(f, 'rollback-agent-temp-created-before-identity', true);
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-complete/,
+      );
+    });
+    assert.equal(
+      await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
+      '---\ndescription: test\nmode: subagent\n---\nworker\n',
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('rollback recovers when publish state is persisted before rename', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'agent-stable-name-publish-state-persisted');
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-complete/,
+      );
+    });
+    assert.equal(
+      await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
+      '---\ndescription: test\nmode: subagent\n---\nworker\n',
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('resume never adopts a same-content recreated stage', { skip: process.platform === 'win32' }, async () => {
   const f = await fixture();
   try {

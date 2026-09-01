@@ -124,7 +124,8 @@ type JournalOperation = MoveOperation & {
   generatedAgentRewrittenFingerprint?: string;
   generatedAgentTemporaryPath?: string;
   generatedAgentTemporaryIdentity?: PathIdentity;
-  generatedAgentPublishState?: 'published' | 'proof-unlinked' | 'proof-relinked' | 'complete';
+  generatedAgentTemporaryToken?: string;
+  generatedAgentPublishState?: 'publish-intent' | 'published' | 'proof-unlinked' | 'proof-relinked' | 'complete';
   generatedAgentPublishedIdentity?: PathIdentity;
   generatedAgentRestoreState?: 'pending' | 'restored';
   generatedAgentRestoredIdentity?: PathIdentity;
@@ -788,6 +789,7 @@ async function replaceAgentFileAtomically(
   if (!current.isFile() || current.isSymbolicLink()) throw new Error(`Generated agent path is not a regular file: ${path}`);
   const temporary = `${path}.${randomUUID()}.tmp`;
   operation.generatedAgentTemporaryPath = resolve(temporary);
+  operation.generatedAgentTemporaryToken = randomUUID();
   await persistJournal(journal);
   crashAfter('agent-temp-intent-persisted');
 
@@ -798,11 +800,24 @@ async function replaceAgentFileAtomically(
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
       current.mode & 0o7777,
     );
+    await handle.writeFile(`${operation.generatedAgentTemporaryToken}\n`, { encoding: 'utf8' });
+    await handle.sync();
+    if (partialCrashLabel === 'agent-stable-name-partial-write') {
+      crashAfter('agent-rewrite-temp-created-before-identity');
+    } else if (partialCrashLabel === 'rollback-agent-restore-partial-write') {
+      crashAfter('rollback-agent-temp-created-before-identity');
+    }
     operation.generatedAgentTemporaryIdentity = await pathIdentity(temporary);
     if (!operation.generatedAgentTemporaryIdentity) {
       throw new Error(`Generated agent temporary path disappeared after creation: ${temporary}`);
     }
     await persistJournal(journal);
+    await handle.close();
+    handle = undefined;
+    handle = await open(
+      temporary,
+      constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0),
+    );
     if (partialCrashLabel && process.env.NODE_ENV === 'test'
       && process.env.SKILLREPO_TEST_CRASH_AFTER === partialCrashLabel) {
       const partial = text.slice(0, Math.max(1, Math.floor(text.length / 2)));
@@ -817,13 +832,17 @@ async function replaceAgentFileAtomically(
     await chmod(temporary, current.mode & 0o7777);
     if (partialCrashLabel === 'agent-stable-name-partial-write') {
       operation.generatedAgentPublishedIdentity = operation.generatedAgentTemporaryIdentity;
-      operation.generatedAgentPublishState = 'published';
+      operation.generatedAgentPublishState = 'publish-intent';
       await persistJournal(journal);
+      crashAfter('agent-stable-name-publish-state-persisted');
     }
     await rename(temporary, path);
-    if (partialCrashLabel === 'agent-stable-name-partial-write') crashAfter('agent-stable-name-published');
+    if (partialCrashLabel === 'agent-stable-name-partial-write') {
+      crashAfter('agent-stable-name-published');
+    }
     operation.generatedAgentTemporaryPath = undefined;
     operation.generatedAgentTemporaryIdentity = undefined;
+    operation.generatedAgentTemporaryToken = undefined;
     await persistJournal(journal);
     const identity = await pathIdentity(path);
     if (!identity) throw new Error(`Generated agent path disappeared after atomic replace: ${path}`);
@@ -833,6 +852,7 @@ async function replaceAgentFileAtomically(
     await unlink(temporary).catch(() => undefined);
     operation.generatedAgentTemporaryPath = undefined;
     operation.generatedAgentTemporaryIdentity = undefined;
+    operation.generatedAgentTemporaryToken = undefined;
     await persistJournal(journal).catch(() => undefined);
     throw error;
   }
@@ -1070,15 +1090,22 @@ async function clearGeneratedAgentTemporary(
       return [`Generated agent temporary path is not a regular file: ${path}`];
     }
     if (!operation.generatedAgentTemporaryIdentity) {
-      return [`Generated agent temporary ownership is not provable: ${path}`];
+      if (!operation.generatedAgentTemporaryToken) {
+        return [`Generated agent temporary ownership is not provable: ${path}`];
+      }
+      if (await readFile(path, 'utf8') !== `${operation.generatedAgentTemporaryToken}\n`) {
+        return [`Generated agent temporary ownership is not provable: ${path}`];
+      }
     }
-    if (!sameIdentity(identityFromStat(pathStat), operation.generatedAgentTemporaryIdentity)) {
+    if (operation.generatedAgentTemporaryIdentity
+      && !sameIdentity(identityFromStat(pathStat), operation.generatedAgentTemporaryIdentity)) {
       return [`Generated agent temporary path was recreated outside transaction: ${path}`];
     }
     await unlink(path);
   }
   operation.generatedAgentTemporaryPath = undefined;
   operation.generatedAgentTemporaryIdentity = undefined;
+  operation.generatedAgentTemporaryToken = undefined;
   await persistJournal(journal);
   return [];
 }
@@ -1091,14 +1118,27 @@ async function recoverGeneratedAgentPublish(journal: MigrationJournal): Promise<
     if (!expectedIdentity) throw new Error(`Generated agent publish ownership is not recorded: ${operation.operationId}`);
 
     let stageStat = await tryLstat(operation.stagePath);
-    if (!stageStat && operation.generatedAgentTemporaryPath) {
-      const temporaryStat = await tryLstat(operation.generatedAgentTemporaryPath);
-      if (!temporaryStat?.isFile() || temporaryStat.isSymbolicLink()
-        || !sameIdentity(identityFromStat(temporaryStat), operation.generatedAgentTemporaryIdentity)) {
+    const temporaryStat = operation.generatedAgentTemporaryPath
+      ? await tryLstat(operation.generatedAgentTemporaryPath)
+      : undefined;
+    if (temporaryStat) {
+      if (!temporaryStat.isFile() || temporaryStat.isSymbolicLink()
+        || !operation.generatedAgentTemporaryIdentity
+        || !sameIdentity(identityFromStat(temporaryStat), operation.generatedAgentTemporaryIdentity)
+        || !operation.generatedAgentRewrittenFingerprint
+        || await fingerprintPath(operation.generatedAgentTemporaryPath!) !== operation.generatedAgentRewrittenFingerprint) {
         throw new Error(`Generated agent publish temporary path is not owned: ${operation.operationId}`);
       }
-      await rename(operation.generatedAgentTemporaryPath, operation.stagePath);
+    }
+    if (!stageStat && temporaryStat) {
+      await rename(operation.generatedAgentTemporaryPath!, operation.stagePath);
       stageStat = await tryLstat(operation.stagePath);
+    } else if (stageStat && temporaryStat && publishState === 'publish-intent'
+      && sameIdentity(identityFromStat(stageStat), operation.stagedIdentity)) {
+      await rename(operation.generatedAgentTemporaryPath!, operation.stagePath);
+      stageStat = await tryLstat(operation.stagePath);
+    } else if (stageStat && temporaryStat) {
+      await unlink(operation.generatedAgentTemporaryPath!);
     }
     if (!stageStat?.isFile() || stageStat.isSymbolicLink()
       || !sameIdentity(identityFromStat(stageStat), expectedIdentity)) {
@@ -1119,6 +1159,7 @@ async function recoverGeneratedAgentPublish(journal: MigrationJournal): Promise<
     }
     operation.generatedAgentTemporaryPath = undefined;
     operation.generatedAgentTemporaryIdentity = undefined;
+    operation.generatedAgentTemporaryToken = undefined;
     operation.generatedAgentPublishState = 'complete';
     await persistJournal(journal);
   }
