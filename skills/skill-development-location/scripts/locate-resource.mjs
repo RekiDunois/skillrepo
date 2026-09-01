@@ -218,23 +218,32 @@ async function collectMarkdownFiles(root, recursive = true) {
   return files;
 }
 
-function standardSources(kind, configDir, projectRoot) {
-  if (kind === 'skill') {
-    return [
+function standardSources(kind, configDir, projectRoots) {
+  const projectSources = projectRoots.flatMap(projectRoot => kind === 'skill'
+    ? [
       join(projectRoot, '.opencode', 'skills'),
       join(projectRoot, '.opencode', 'skill'),
       join(projectRoot, '.claude', 'skills'),
+      join(projectRoot, '.agents', 'skills'),
+    ]
+    : [
+      { path: join(projectRoot, '.opencode', 'agents') },
+      { path: join(projectRoot, '.opencode', 'agent') },
+      { path: join(projectRoot, '.opencode', 'modes'), recursive: false },
+      { path: join(projectRoot, '.opencode', 'mode'), recursive: false },
+      join(projectRoot, '.claude', 'agents'),
+    ]);
+
+  if (kind === 'skill') {
+    return [
+      ...projectSources,
       join(configDir, 'skills'),
       join(configDir, 'skill'),
       join(homedir(), '.claude', 'skills'),
     ];
   }
   return [
-    { path: join(projectRoot, '.opencode', 'agents') },
-    { path: join(projectRoot, '.opencode', 'agent') },
-    { path: join(projectRoot, '.opencode', 'modes'), recursive: false },
-    { path: join(projectRoot, '.opencode', 'mode'), recursive: false },
-    join(projectRoot, '.claude', 'agents'),
+    ...projectSources,
     { path: join(configDir, 'agents') },
     { path: join(configDir, 'agent') },
     { path: join(configDir, 'modes'), recursive: false },
@@ -244,6 +253,26 @@ function standardSources(kind, configDir, projectRoot) {
     { path: join(homedir(), '.claude', 'modes'), recursive: false },
     { path: join(homedir(), '.claude', 'mode'), recursive: false },
   ];
+}
+
+async function projectDirectories(projectRoot) {
+  const current = await realpath(projectRoot).catch(() => resolve(projectRoot));
+  const gitRoot = gitValue(current, ['rev-parse', '--show-toplevel']);
+  const boundary = gitRoot ? resolve(gitRoot) : current;
+  const directories = [];
+  let directory = current;
+
+  while (true) {
+    directories.push(directory);
+    if (directory === boundary) break;
+    const parent = dirname(directory);
+    if (parent === directory || !parent.startsWith(boundary + sep)) {
+      directories.push(boundary);
+      break;
+    }
+    directory = parent;
+  }
+  return directories;
 }
 
 function pathResourceId(kind, sourceRoot, logicalPath) {
@@ -309,15 +338,17 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
   const data = await readConfig(configFile);
   const configDir = resolve(expandHome(process.env.OPENCODE_CONFIG_DIR ?? '~/.config/opencode'));
   const projectRoot = resolve(expandHome(explicitProjectRoot ?? process.cwd()));
+  const projectRoots = await projectDirectories(projectRoot);
   const configured = kind === 'skill'
     ? configuredPaths(data.skills)
     : configuredPaths(data.agents);
   const configuredRoots = sourceDirectories(configured, projectRoot);
   const roots = [
-    ...sourceDirectories(standardSources(kind, configDir, projectRoot), projectRoot),
+    ...sourceDirectories(standardSources(kind, configDir, projectRoots), projectRoot),
     ...configuredRoots,
   ];
-  const candidates = [];
+  const primaryCandidates = [];
+  const aliasCandidates = [];
 
   for (const root of roots) {
     for (const file of await collectMarkdownFiles(root.path, root.recursive)) {
@@ -325,7 +356,7 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
       const identifiers = resourceIds(kind, root.path, file.logicalPath, metadataName);
       if (!identifiers.includes(name)) continue;
       const sourceRelativePath = relative(root.path, file.logicalPath).split(sep).join('/');
-      candidates.push({
+      const candidate = {
         path: file.path,
         id: identifiers[0],
         identifiers,
@@ -334,11 +365,14 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
         configuredSource: root.configured,
         frontmatterName: metadataName,
         git: gitState(file.path),
-      });
+      };
+      if (identifiers[0] === name) primaryCandidates.push(candidate);
+      else aliasCandidates.push(candidate);
     }
   }
 
-  const unique = [...new Map(candidates.map(candidate => [candidate.path, candidate])).values()];
+  const matches = primaryCandidates.length ? primaryCandidates : aliasCandidates;
+  const unique = [...new Map(matches.map(candidate => [candidate.path, candidate])).values()];
   if (unique.length !== 1) {
     const reason = unique.length === 0 ? 'resource not found' : 'resource is ambiguous';
     const error = new Error(`${reason}: ${kind} '${name}'`);
