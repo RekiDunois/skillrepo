@@ -2,6 +2,47 @@
 
 `skillrepo` registers ordinary skill/agent repositories with OpenCode so they can stay outside OpenCode's default config directories while remaining directly discoverable from their working trees.
 
+## Install and use
+
+This repository is not published to npm. Install it from a checkout. Node.js 22+ is required; Git is also required for the migration commit-readiness commands.
+
+For a normal local installation:
+
+```bash
+git clone https://github.com/RekiDunois/skillrepo.git
+cd skillrepo
+npm install
+npm run build
+npm install -g .
+```
+
+Register the checkout with OpenCode. This adds its `skills/` directory to OpenCode's skill sources and links its `agents/` directory:
+
+```bash
+skillrepo register "$(pwd)"
+skillrepo doctor
+```
+
+After registration, the skills in this repository, including `skill-modification`, are available in OpenCode. Ask OpenCode to use `skill-modification` when changing a skill or agent. The registration is idempotent, so running it again is safe.
+
+When the checkout is updated, rebuild it and run the health check. Re-registration is normally unnecessary because OpenCode keeps the checkout path:
+
+```bash
+git pull
+npm install
+npm run build
+skillrepo doctor
+```
+
+To remove the registration without deleting the checkout:
+
+```bash
+skillrepo unregister "$(pwd)"
+npm uninstall -g skillrepo
+```
+
+The migration commands are for moving an existing OpenCode installation into external repositories; they are not needed for the normal install-and-register flow.
+
 ## v0 scope
 
 ```bash
