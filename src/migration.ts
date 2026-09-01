@@ -231,11 +231,11 @@ type MigrationJournal = {
 type LegacyMigrationJournal = {
   schemaVersion: 1;
   transactionId: string;
-  planPath: string;
-  planFingerprint: string;
-  sourceRoot: string;
-  targetRoot: string;
-  status: string;
+  planPath?: string;
+  planFingerprint?: string;
+  sourceRoot?: string;
+  targetRoot?: string;
+  status?: string;
   operations: unknown[];
   journalPath: string;
 };
@@ -2884,14 +2884,7 @@ async function loadJournals(sourceRoot: string): Promise<LoadedMigrationJournal[
     if (!entry.isFile()) throw new Error(`Migration journal entry is not a file: ${join(directory, entry.name)}`);
     const path = join(directory, entry.name);
     const value = await readJson(path);
-    if (value.schemaVersion === 1
-      && typeof value.transactionId === 'string'
-      && typeof value.planPath === 'string'
-      && typeof value.planFingerprint === 'string'
-      && typeof value.sourceRoot === 'string'
-      && typeof value.targetRoot === 'string'
-      && typeof value.status === 'string'
-      && Array.isArray(value.operations)) {
+    if (value.schemaVersion === 1 && typeof value.transactionId === 'string' && Array.isArray(value.operations)) {
       journals.push({ ...value, journalPath: path } as unknown as LegacyMigrationJournal);
       continue;
     }
@@ -2922,7 +2915,9 @@ async function matchingJournal(
       && journal.status !== 'preflight-failed'
   ));
   if (legacyNeedingRecovery.length) {
-    const changedPlan = legacyNeedingRecovery.find(journal => journal.planFingerprint !== planFingerprint);
+    const changedPlan = legacyNeedingRecovery.find(journal => (
+      journal.planFingerprint !== undefined && journal.planFingerprint !== planFingerprint
+    ));
     const journal = changedPlan ?? legacyNeedingRecovery[0]!;
     throw new Error(
       changedPlan
