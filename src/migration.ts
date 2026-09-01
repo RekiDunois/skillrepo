@@ -977,6 +977,15 @@ async function stagedContentIsOwned(operation: JournalOperation): Promise<boolea
     && (await readFile(operation.stagePath, 'utf8')) === rewritten;
 }
 
+async function stagedContentIsOriginal(operation: JournalOperation): Promise<boolean> {
+  if (!operation.stagedIdentity || await fingerprintPath(operation.stagePath) !== operation.sourceFingerprint) return false;
+  if (!sameIdentity(await pathIdentity(operation.stagePath), operation.stagedIdentity)) return false;
+  if (!operation.stageOwnershipPath) return true;
+  const ownershipIdentity = await pathIdentity(operation.stageOwnershipPath);
+  return sameIdentity(ownershipIdentity, operation.stagedIdentity)
+    && sameIdentity(ownershipIdentity, await pathIdentity(operation.stagePath));
+}
+
 async function recoverCreatingDirectories(journal: MigrationJournal): Promise<void> {
   const creating = journal.creatingDirectories ?? [];
   if (!creating.length) return;
@@ -1103,6 +1112,7 @@ async function ensureStableAgentName(
   const backupPath = join(journal.journalPath, '..', `${journal.transactionId}.${operation.operationId}.original`);
   operation.generatedAgentBackupPath = resolve(backupPath);
   await persistJournal(journal);
+  crashAfter('agent-backup-intent-persisted');
   const backupHandle = await open(
     backupPath,
     constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
@@ -1686,8 +1696,9 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
   const issues: string[] = [];
   const sourceIsOriginal = await fingerprintPath(operation.source) === operation.sourceFingerprint
     && sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity);
+  const stageIsOriginal = await stagedContentIsOriginal(operation);
   let generatedAgentOriginal: string | undefined;
-  if (operation.generatedAgentBackupPath && !sourceIsOriginal) {
+  if (operation.generatedAgentBackupPath && !sourceIsOriginal && !stageIsOriginal) {
     const backupStat = await tryLstat(operation.generatedAgentBackupPath);
     if (!backupStat?.isFile() || backupStat.isSymbolicLink()) {
       return [`Generated agent backup is not a regular file: ${operation.generatedAgentBackupPath}`];
@@ -1875,7 +1886,12 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
       const unknown = entries.filter(name => !ownedEntries.has(name));
       if (unknown.length) return [`Unknown files remain in transaction staging: ${unknown.join(', ')}`];
       for (const operation of journal.operations) {
-        if (await lexists(operation.stagePath)) {
+        const stageExists = await lexists(operation.stagePath);
+        const ownershipExists = operation.stageOwnershipPath ? await lexists(operation.stageOwnershipPath) : false;
+        if (stageExists) {
+          if (operation.stageOwnershipPath && !ownershipExists) {
+            return [`Staging ownership proof is missing: ${operation.stageOwnershipPath}`];
+          }
           if (!(await stagedContentIsOwned(operation))) {
             return [`Staging content was modified outside transaction: ${operation.stagePath}`];
           }
@@ -1883,9 +1899,14 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
             return [`Staging content was recreated outside transaction: ${operation.stagePath}`];
           }
         }
-        if (operation.stageOwnershipPath && await lexists(operation.stageOwnershipPath)
-          && !sameIdentity(await pathIdentity(operation.stageOwnershipPath), operation.sourceIdentity)) {
-          return [`Staging ownership proof was replaced outside transaction: ${operation.stageOwnershipPath}`];
+        if (operation.stageOwnershipPath && ownershipExists) {
+          const ownershipIdentity = await pathIdentity(operation.stageOwnershipPath);
+          if (!sameIdentity(ownershipIdentity, operation.sourceIdentity)) {
+            return [`Staging ownership proof was replaced outside transaction: ${operation.stageOwnershipPath}`];
+          }
+          if (stageExists && !sameIdentity(await pathIdentity(operation.stagePath), ownershipIdentity)) {
+            return [`Staging content ownership proof changed outside transaction: ${operation.stagePath}`];
+          }
         }
       }
       for (const operation of journal.operations) {

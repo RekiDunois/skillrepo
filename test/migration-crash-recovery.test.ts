@@ -294,3 +294,49 @@ test('rollback never restores a modified generated-agent backup', { skip: proces
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+test('rollback recovers when killed after agent backup intent', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'agent-backup-intent-persisted');
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-complete/,
+      );
+    });
+    assert.equal(
+      await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
+      '---\ndescription: test\nmode: subagent\n---\nworker\n',
+    );
+    await assert.rejects(access(join(f.targetRoot, 'demo-repo')));
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('rollback preserves stage when its ownership proof disappears', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'source-staged-op-0003');
+    const names = await readdir(join(f.sourceRoot, '.skillrepo-migrations'));
+    const journalPath = join(f.sourceRoot, '.skillrepo-migrations', names.find(name => name.endsWith('.json'))!);
+    const journal = JSON.parse(await readFile(journalPath, 'utf8')) as {
+      operations: Array<{ operationId: string; source: string; stagePath: string; stageOwnershipPath?: string }>;
+    };
+    const operation = journal.operations.find(item => item.operationId === 'op-0003')!;
+    assert.ok(operation.stageOwnershipPath);
+    await rm(operation.stageOwnershipPath!, { force: true });
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-incomplete/,
+      );
+    });
+    await access(operation.stagePath);
+    await assert.rejects(access(operation.source));
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
