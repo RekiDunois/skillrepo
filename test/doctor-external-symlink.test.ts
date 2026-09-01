@@ -25,6 +25,40 @@ async function withDoctorEnv<T>(configDir: string, binDir: string, fn: () => Pro
   }
 }
 
+async function makeSkillDiscoveryFixture(output: string): Promise<{
+  root: string;
+  configDir: string;
+  binDir: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-doctor-skills-'));
+  const configDir = join(root, 'opencode');
+  const skillsDir = join(root, 'repo', 'skills');
+  const binDir = join(root, 'bin');
+
+  await mkdir(join(skillsDir, 'alpha'), { recursive: true });
+  await mkdir(join(skillsDir, 'beta'), { recursive: true });
+  await mkdir(configDir, { recursive: true });
+  await mkdir(binDir, { recursive: true });
+  await writeFile(join(skillsDir, 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: alpha\n---\n', 'utf8');
+  await writeFile(join(skillsDir, 'beta', 'SKILL.md'), '---\nname: beta\ndescription: beta\n---\n', 'utf8');
+  await writeFile(join(configDir, 'opencode.jsonc'), `${JSON.stringify({ skills: { paths: [skillsDir] } })}\n`, 'utf8');
+
+  const opencode = join(binDir, 'opencode');
+  await writeFile(
+    opencode,
+    `#!/usr/bin/env sh
+if [ "$1" = "debug" ] && [ "$2" = "skill" ]; then
+  printf '%s\\n' ${output}
+fi
+exit 0
+`,
+    'utf8',
+  );
+  await chmod(opencode, 0o755);
+
+  return { root, configDir, binDir };
+}
+
 test('doctor accepts pre-existing external agent directories and runtime file symlinks', async () => {
   const root = await mkdtemp(join(tmpdir(), 'skillrepo-doctor-symlink-'));
   const configDir = join(root, 'opencode');
@@ -57,5 +91,27 @@ test('doctor accepts pre-existing external agent directories and runtime file sy
     assert.deepEqual(result.issues, []);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('doctor reports configured skills missing from OpenCode discovery', async () => {
+  const fixture = await makeSkillDiscoveryFixture('alpha');
+  try {
+    const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
+    assert.equal(result.ok, false);
+    assert.ok(result.issues.some(issue => issue.includes('missing configured skill IDs: beta')));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('doctor accepts configured skills present in OpenCode discovery', async () => {
+  const fixture = await makeSkillDiscoveryFixture('alpha beta');
+  try {
+    const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.issues, []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
   }
 });
