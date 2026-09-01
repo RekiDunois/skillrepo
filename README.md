@@ -157,7 +157,7 @@ npm install
 npm test
 ```
 
-GitHub Actions runs the full unit suite plus packaged CLI/OpenCode integration on Ubuntu. A separate Windows job builds the project and runs the commit-readiness/Git-ignore unit subset, including the target-filesystem `core.ignoreCase` regression, so the filesystem-sensitive Windows branch is exercised without claiming that unrelated POSIX symlink/runtime tests are Windows-portable.
+GitHub Actions runs the full unit suite plus packaged CLI/OpenCode integration on Ubuntu. The OpenCode install is pinned to `1.18.25`; existing `debug skill` and `agent list` checks are CLI discovery diagnostics only, while `npm run test:opencode-runtime` separately compares full TUI/Web `/skill` state and executes the real `skill()` tool in both runtimes against a deterministic local provider. A separate Windows job builds the project and runs the commit-readiness/Git-ignore unit subset, including the target-filesystem `core.ignoreCase` regression, so the filesystem-sensitive Windows branch is exercised without claiming that unrelated POSIX symlink/runtime tests are Windows-portable.
 
 ## Skill and agent development
 
