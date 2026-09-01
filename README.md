@@ -46,6 +46,7 @@ The migration commands are for moving an existing OpenCode installation into ext
 ## v0 scope
 
 ```bash
+skillrepo init <dir>
 skillrepo register <repo>
 skillrepo unregister <repo>
 skillrepo exec <repo-id> <repo-relative-resource> [args...]
@@ -57,6 +58,30 @@ skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [-
 skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]
 skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]
 ```
+
+`init` creates a new skillrepo repository skeleton without initializing Git,
+registering the repository, or changing OpenCode configuration:
+
+```bash
+skillrepo init ./new-repo
+skillrepo init .
+```
+
+The target may be missing or an existing empty directory. Non-empty
+directories, files, and symlink paths are rejected before any write. The
+result is:
+
+```text
+repo/
+├── .gitignore
+├── skills/
+│   └── .gitkeep
+└── agents/
+    └── .gitkeep
+```
+
+After adding real skills or agents, run `skillrepo register <repo>` explicitly.
+`init` does not itself make an empty repository discoverable by OpenCode.
 
 A registered repo follows this convention:
 

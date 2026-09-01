@@ -7,6 +7,25 @@ description: Locate the real source path for an OpenCode skill or agent before e
 
 Load this skill before reading or changing any OpenCode skill or agent. The path shown by a symlink, editor search result, or cached inventory is not authoritative. The configured source path is authoritative.
 
+## Create a new repository or resource
+
+For a completely new skill repository, initialize the repository first:
+
+```bash
+skillrepo init /path/to/new-repo
+```
+
+`init` creates only the repository skeleton (`.gitignore`, `skills/.gitkeep`,
+and `agents/.gitkeep`). It does not initialize Git, modify OpenCode
+configuration, create symlinks, register the repository, or require OpenCode
+to discover an empty repository. Add the new skill or agent, then explicitly
+run `skillrepo register /path/to/new-repo` when it is ready.
+
+When creating a new resource inside an existing repository, create its
+directory and required frontmatter directly according to that repository's
+conventions. Do not run the locator first: locator is for locating an existing
+resource before editing it, not for proving that a new resource already exists.
+
 ## Locate the source first
 
 1. Run `pwd` and keep the returned path unchanged when passing paths to tools or agents.

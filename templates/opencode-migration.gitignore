@@ -1,7 +1,8 @@
-# OpenCode migration-analysis snapshot policy
+# skillrepo repository ignore policy
 #
-# This file is intended to be copied to the SOURCE ROOT as `.gitignore`
-# before creating a synchronization profile with the chosen snapshot tool.
+# This file can be used as a new skillrepo repository's `.gitignore`, or copied
+# to a source root before creating a synchronization profile with the chosen
+# snapshot tool.
 #
 # Goal: preserve config, skills, agents, scripts, references, assets, and
 # other human-authored material while dropping obvious local/generated state.

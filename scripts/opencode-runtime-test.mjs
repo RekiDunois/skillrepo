@@ -284,31 +284,16 @@ async function createFixture(root, mockBaseUrl) {
   const configDir = join(root, 'opencode-config')
   const homeDir = join(root, 'home')
   const projectDir = join(root, 'project')
-  const sourceRoot = join(root, 'migration-source')
-  const targetRoot = join(root, 'migrated-repos')
-  const planPath = join(root, 'migration-plan.json')
-  const repoId = 'skillrepo-runtime-probe-repo'
-  const repoRoot = join(targetRoot, repoId)
+  const repoRoot = join(root, 'init-runtime-repo')
   const skillPath = join(repoRoot, 'skills', SKILL_NAME, 'SKILL.md')
 
-  await mkdir(join(sourceRoot, 'skill', SKILL_NAME), { recursive: true })
   await mkdir(configDir, { recursive: true })
   await mkdir(homeDir, { recursive: true })
   await mkdir(projectDir, { recursive: true })
   const skillSource = resolve(dirname(fileURLToPath(import.meta.url)), '../skills/skill-modification/SKILL.md')
   const skillContent = await readFile(skillSource, 'utf8')
   assert.match(skillContent, new RegExp(EXPECTED_RAW_SKILL_CONTENT_MARKER))
-  await writeFile(join(sourceRoot, 'skill', SKILL_NAME, 'SKILL.md'), skillContent, 'utf8')
   await writeProjectConfig(root, mockBaseUrl)
-  await writeFile(
-    planPath,
-    `${JSON.stringify({
-      schemaVersion: 1,
-      generatedFrom: { sourceRoot },
-      repositories: [{ id: repoId, action: 'CREATE_AND_MOVE', skills: [SKILL_NAME], agents: [], libs: [] }],
-    }, null, 2)}\n`,
-    'utf8',
-  )
 
   const env = {
     ...process.env,
@@ -324,7 +309,10 @@ async function createFixture(root, mockBaseUrl) {
   delete env.OPENCODE_CONFIG
 
   const cli = resolve(dirname(fileURLToPath(import.meta.url)), '../dist/src/cli.js')
-  await execFileAsync(process.execPath, [cli, 'migration', 'apply', '--plan', planPath, '--target-root', targetRoot, '--execute'], { env })
+  await execFileAsync(process.execPath, [cli, 'init', repoRoot], { env })
+  await mkdir(dirname(skillPath), { recursive: true })
+  await writeFile(skillPath, skillContent, 'utf8')
+  await execFileAsync(process.execPath, [cli, 'register', repoRoot], { env })
   await access(skillPath)
 
   const debug = await execFileAsync(process.env.OPENCODE_BIN ?? 'opencode', ['debug', 'skill'], {
@@ -338,7 +326,7 @@ async function createFixture(root, mockBaseUrl) {
   const config = await readFile(join(configDir, 'opencode.jsonc'), 'utf8')
   assert.match(config, new RegExp(repoRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
 
-  return { configDir, env, projectDir, repoRoot, skillPath, sourceRoot, targetRoot }
+  return { configDir, env, projectDir, repoRoot, skillPath }
 }
 
 async function listProbe(baseUrl, projectDir) {
