@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           repo="$RUNNER_TEMP/fixture-repo"
-          mkdir -p "$repo/skills/fixture-skill" "$repo/agents"
+          mkdir -p "$repo/skills/fixture-skill" "$repo/agents" "$repo/bin"
           cat > "$repo/skills/fixture-skill/SKILL.md" <<'EOF'
           ---
           name: fixture-skill
@@ -63,6 +63,12 @@ jobs:
           ---
           Test fixture.
           EOF
+          cat > "$repo/bin/runtime-probe.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          printf 'registered-runtime:%s\n' "$1"
+          EOF
+          chmod +x "$repo/bin/runtime-probe.sh"
       - name: Register fixture with repo-specific post-check
         shell: bash
         env:
@@ -72,6 +78,13 @@ jobs:
           skillrepo register "$RUNNER_TEMP/fixture-repo"
           skillrepo register "$RUNNER_TEMP/fixture-repo"
           skillrepo doctor
+      - name: Verify registered runtime exec through packaged CLI
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
+        run: |
+          set -euo pipefail
+          skillrepo exec fixture-repo bin/runtime-probe.sh --probe | grep -F 'registered-runtime:--probe'
       - name: Verify initial discovery through OpenCode
         shell: bash
         env:
@@ -251,3 +264,57 @@ jobs:
             --resume \
             --execute
           skillrepo doctor
+      - name: Verify migration commit audit through packaged CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/migration-repos/migrated-repo"
+          test ! -e "$repo/.git"
+          test ! -e "$repo/.gitignore"
+          skillrepo migration audit \
+            --plan "$RUNNER_TEMP/migration-plan.json" \
+            --target-root "$RUNNER_TEMP/migration-repos" | tee "$RUNNER_TEMP/migration-audit.log"
+          grep -F 'COMMIT-READY: YES' "$RUNNER_TEMP/migration-audit.log"
+          test ! -e "$repo/.git"
+          test ! -e "$repo/.gitignore"
+          skillrepo migration audit \
+            --plan "$RUNNER_TEMP/migration-plan.json" \
+            --target-root "$RUNNER_TEMP/migration-repos" \
+            --json > "$RUNNER_TEMP/migration-audit.json"
+          node -e 'const fs=require("fs"); const x=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); if(!x.readyForInitialCommit || x.summary.repositories!==1) process.exit(1)' "$RUNNER_TEMP/migration-audit.json"
+      - name: Verify migration ignore through packaged CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/migration-repos/migrated-repo"
+          mkdir -p "$repo/skills/migrated-skill/__pycache__"
+          touch "$repo/.DS_Store"
+          skillrepo migration ignore \
+            --plan "$RUNNER_TEMP/migration-plan.json" \
+            --target-root "$RUNNER_TEMP/migration-repos" | tee "$RUNNER_TEMP/migration-ignore-dry-run.log"
+          grep -F '2 pattern(s) across 1 repo(s)' "$RUNNER_TEMP/migration-ignore-dry-run.log"
+          test ! -e "$repo/.gitignore"
+          test ! -e "$repo/.git"
+          skillrepo migration ignore \
+            --plan "$RUNNER_TEMP/migration-plan.json" \
+            --target-root "$RUNNER_TEMP/migration-repos" \
+            --execute
+          grep -Fx '.DS_Store' "$repo/.gitignore"
+          grep -Fx '__pycache__/' "$repo/.gitignore"
+          test ! -e "$repo/.git"
+          skillrepo migration ignore \
+            --plan "$RUNNER_TEMP/migration-plan.json" \
+            --target-root "$RUNNER_TEMP/migration-repos" \
+            --execute | grep -F '0 pattern(s) across 0 repo(s)'
+
+  commit-readiness-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm run build
+      - name: Run Windows commit-readiness tests
+        run: node --test dist/test/git_ignore_batch.test.js dist/test/git_ignore_oracle.test.js dist/test/ignore.test.js dist/test/readiness.test.js
