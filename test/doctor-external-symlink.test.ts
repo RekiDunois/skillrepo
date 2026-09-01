@@ -4,7 +4,7 @@ import { chmod, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { doctor } from '../src/core.js';
+import { assertNoRuntimeCollisions, doctor, inspectRepo } from '../src/core.js';
 
 async function withDoctorEnv<T>(configDir: string, binDir: string, fn: () => Promise<T>): Promise<T> {
   const oldDir = process.env.OPENCODE_CONFIG_DIR;
@@ -122,6 +122,25 @@ test('doctor does not count a skill ID mentioned in another discovery entry as d
     const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
     assert.equal(result.ok, false);
     assert.ok(result.issues.some(issue => issue.includes('missing configured skill IDs: beta')));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('collision pre-check fails closed when skill discovery JSON is truncated', async () => {
+  const fixture = await makeSkillDiscoveryFixture('[{"name":"beta"},');
+  const candidate = join(fixture.root, 'candidate');
+  try {
+    await mkdir(join(candidate, 'skills', 'beta'), { recursive: true });
+    await writeFile(
+      join(candidate, 'skills', 'beta', 'SKILL.md'),
+      '---\nname: beta\ndescription: candidate beta\n---\n',
+      'utf8',
+    );
+    const inventory = await inspectRepo(candidate);
+    await withDoctorEnv(fixture.configDir, fixture.binDir, async () => {
+      await assert.rejects(() => assertNoRuntimeCollisions(inventory));
+    });
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
