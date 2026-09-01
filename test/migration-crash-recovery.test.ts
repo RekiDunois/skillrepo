@@ -241,6 +241,45 @@ test('rollback recovers after stable agent rewrite is killed', { skip: process.p
   }
 });
 
+test('rollback recovers after generated-agent rewrite is killed mid-write', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'agent-stable-name-partial-write');
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-complete/,
+      );
+    });
+    assert.equal(
+      await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
+      '---\ndescription: test\nmode: subagent\n---\nworker\n',
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('rollback resumes after generated-agent restore is killed mid-write', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await runCrash(f, 'config-written');
+    await runCrash(f, 'rollback-agent-restore-partial-write', true);
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-complete/,
+      );
+    });
+    assert.equal(
+      await readFile(join(f.sourceRoot, 'agents', 'worker.md'), 'utf8'),
+      '---\ndescription: test\nmode: subagent\n---\nworker\n',
+    );
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('resume never adopts a same-content recreated stage', { skip: process.platform === 'win32' }, async () => {
   const f = await fixture();
   try {

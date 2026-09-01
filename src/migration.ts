@@ -122,6 +122,9 @@ type JournalOperation = MoveOperation & {
   generatedAgentOriginalFingerprint?: string;
   generatedAgentOriginalContentFingerprint?: string;
   generatedAgentRewrittenFingerprint?: string;
+  generatedAgentTemporaryPath?: string;
+  generatedAgentRestoreState?: 'pending' | 'restored';
+  generatedAgentRestoredIdentity?: PathIdentity;
 };
 
 type JournalRegistration = {
@@ -766,6 +769,63 @@ function crashAfter(label: string): void {
   }
 }
 
+async function replaceAgentFileAtomically(
+  path: string,
+  text: string,
+  journal: MigrationJournal,
+  operation: JournalOperation,
+  partialCrashLabel?: string,
+): Promise<PathIdentity> {
+  if (operation.generatedAgentTemporaryPath) {
+    const previous = await tryLstat(operation.generatedAgentTemporaryPath);
+    if (previous) {
+      if (!previous.isFile() || previous.isSymbolicLink()) {
+        throw new Error(`Generated agent temporary path is not a regular file: ${operation.generatedAgentTemporaryPath}`);
+      }
+      await unlink(operation.generatedAgentTemporaryPath);
+    }
+  }
+
+  const current = await lstat(path);
+  if (!current.isFile() || current.isSymbolicLink()) throw new Error(`Generated agent path is not a regular file: ${path}`);
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  operation.generatedAgentTemporaryPath = resolve(temporary);
+  await persistJournal(journal);
+
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(
+      temporary,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+      current.mode & 0o7777,
+    );
+    if (partialCrashLabel && process.env.NODE_ENV === 'test'
+      && process.env.SKILLREPO_TEST_CRASH_AFTER === partialCrashLabel) {
+      const partial = text.slice(0, Math.max(1, Math.floor(text.length / 2)));
+      await handle.writeFile(partial, { encoding: 'utf8' });
+      await handle.sync();
+      crashAfter(partialCrashLabel);
+    }
+    await handle.writeFile(text, { encoding: 'utf8' });
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await chmod(temporary, current.mode & 0o7777);
+    await rename(temporary, path);
+    operation.generatedAgentTemporaryPath = undefined;
+    await persistJournal(journal);
+    const identity = await pathIdentity(path);
+    if (!identity) throw new Error(`Generated agent path disappeared after atomic replace: ${path}`);
+    return identity;
+  } catch (error) {
+    if (handle) await handle.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+    operation.generatedAgentTemporaryPath = undefined;
+    await persistJournal(journal).catch(() => undefined);
+    throw error;
+  }
+}
+
 async function persistJournal(journal: MigrationJournal): Promise<void> {
   journal.updatedAt = now();
   const temporary = `${journal.journalPath}.${randomUUID()}.tmp`;
@@ -986,6 +1046,24 @@ async function stagedContentIsOriginal(operation: JournalOperation): Promise<boo
     && sameIdentity(ownershipIdentity, await pathIdentity(operation.stagePath));
 }
 
+async function clearGeneratedAgentTemporary(
+  operation: JournalOperation,
+  journal: MigrationJournal,
+): Promise<string[]> {
+  if (!operation.generatedAgentTemporaryPath) return [];
+  const path = operation.generatedAgentTemporaryPath;
+  const pathStat = await tryLstat(path);
+  if (pathStat) {
+    if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
+      return [`Generated agent temporary path is not a regular file: ${path}`];
+    }
+    await unlink(path);
+  }
+  operation.generatedAgentTemporaryPath = undefined;
+  await persistJournal(journal);
+  return [];
+}
+
 async function recoverCreatingDirectories(journal: MigrationJournal): Promise<void> {
   const creating = journal.creatingDirectories ?? [];
   if (!creating.length) return;
@@ -1133,7 +1211,12 @@ async function ensureStableAgentName(
   const updated = addStableAgentName(text, stableName, parseFrontmatter(text).hasFrontmatter);
   operation.generatedAgentRewrittenFingerprint = fingerprintBuffer(`file\0${pathStat.mode & 0o7777}\0`, Buffer.from(updated, 'utf8'));
   await persistJournal(journal);
-  await writeFile(path, updated, 'utf8');
+  operation.stagedIdentity = await replaceAgentFileAtomically(path, updated, journal, operation, 'agent-stable-name-partial-write');
+  if (operation.stageOwnershipPath) {
+    await unlink(operation.stageOwnershipPath);
+    await link(path, operation.stageOwnershipPath);
+  }
+  await persistJournal(journal);
   crashAfter('agent-stable-name-written');
 }
 
@@ -1295,7 +1378,7 @@ async function moveOperation(operation: JournalOperation, journal: MigrationJour
 
   await ensureDirectoryPath(dirname(operation.target), journal);
   const expectedTargetFingerprint = operation.stagedFingerprint!;
-  const expectedTargetIdentity = operation.sourceIdentity;
+  const expectedTargetIdentity = operation.stagedIdentity ?? operation.sourceIdentity;
   if (!expectedTargetIdentity) throw new Error(`Operation has no source identity: ${operation.operationId}`);
   operation.targetFingerprint = expectedTargetFingerprint;
   operation.targetIdentity = expectedTargetIdentity;
@@ -1694,8 +1777,12 @@ async function removeAgentRegistrationLinks(journal: MigrationJournal): Promise<
 
 async function restoreMovedOperation(operation: JournalOperation, journal: MigrationJournal): Promise<string[]> {
   const issues: string[] = [];
+  issues.push(...await clearGeneratedAgentTemporary(operation, journal));
+  if (issues.length) return issues;
+  const sourceIdentity = await pathIdentity(operation.source);
   const sourceIsOriginal = await fingerprintPath(operation.source) === operation.sourceFingerprint
-    && sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity);
+    && (sameIdentity(sourceIdentity, operation.sourceIdentity)
+      || sameIdentity(sourceIdentity, operation.generatedAgentRestoredIdentity));
   const stageIsOriginal = await stagedContentIsOriginal(operation);
   let generatedAgentOriginal: string | undefined;
   if (operation.generatedAgentBackupPath && !sourceIsOriginal && !stageIsOriginal) {
@@ -1775,7 +1862,18 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
 
   if (operation.generatedAgentBackupPath) {
     const current = await fingerprintPath(operation.source);
-    if (current === operation.sourceFingerprint) return issues;
+    if (current === operation.sourceFingerprint) {
+      const identity = await pathIdentity(operation.source);
+      if (!sameIdentity(identity, operation.sourceIdentity)) {
+        if (operation.generatedAgentRestoreState !== 'pending' && operation.generatedAgentRestoreState !== 'restored') {
+          return [`Restored agent source identity is not recognized: ${operation.source}`];
+        }
+        operation.generatedAgentRestoredIdentity = identity;
+        operation.generatedAgentRestoreState = 'restored';
+        await persistJournal(journal);
+      }
+      return issues;
+    }
     if (current !== operation.targetFingerprint
       && current !== operation.stagedFingerprint
       && current !== operation.generatedAgentRewrittenFingerprint) {
@@ -1784,11 +1882,22 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
     if (generatedAgentOriginal === undefined) {
       return [`Generated agent backup was not validated before source restore: ${operation.generatedAgentBackupPath}`];
     }
-    await writeFile(operation.source, generatedAgentOriginal, 'utf8');
+    operation.generatedAgentRestoreState = 'pending';
+    await persistJournal(journal);
+    operation.generatedAgentRestoredIdentity = await replaceAgentFileAtomically(
+      operation.source,
+      generatedAgentOriginal,
+      journal,
+      operation,
+      'rollback-agent-restore-partial-write',
+    );
+    operation.generatedAgentRestoreState = 'restored';
+    await persistJournal(journal);
   }
 
   await assertCurrentFingerprint(operation.source, operation.sourceFingerprint, 'Restored migration source');
-  if (!sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity)) {
+  if (!sameIdentity(await pathIdentity(operation.source), operation.sourceIdentity)
+    && !sameIdentity(await pathIdentity(operation.source), operation.generatedAgentRestoredIdentity)) {
     throw new Error(`Restored migration source identity does not match: ${operation.source}`);
   }
   return issues;
@@ -1879,6 +1988,7 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
           operation.stagePath,
           operation.stageOwnershipPath ?? '',
           operation.skillShimStagePath ?? '',
+          operation.generatedAgentTemporaryPath ?? '',
         ])
           .filter(path => path && dirname(path) === journal.stagingRoot)
           .map(path => basename(path)),
@@ -1886,6 +1996,15 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
       const unknown = entries.filter(name => !ownedEntries.has(name));
       if (unknown.length) return [`Unknown files remain in transaction staging: ${unknown.join(', ')}`];
       for (const operation of journal.operations) {
+        if (operation.generatedAgentTemporaryPath && await lexists(operation.generatedAgentTemporaryPath)) {
+          const temporaryStat = await tryLstat(operation.generatedAgentTemporaryPath);
+          if (!temporaryStat?.isFile() || temporaryStat.isSymbolicLink()) {
+            return [`Generated agent temporary path is not a regular file: ${operation.generatedAgentTemporaryPath}`];
+          }
+          await unlink(operation.generatedAgentTemporaryPath);
+          operation.generatedAgentTemporaryPath = undefined;
+          await persistJournal(journal);
+        }
         const stageExists = await lexists(operation.stagePath);
         const ownershipExists = operation.stageOwnershipPath ? await lexists(operation.stageOwnershipPath) : false;
         if (stageExists) {
@@ -1901,7 +2020,7 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
         }
         if (operation.stageOwnershipPath && ownershipExists) {
           const ownershipIdentity = await pathIdentity(operation.stageOwnershipPath);
-          if (!sameIdentity(ownershipIdentity, operation.sourceIdentity)) {
+          if (!sameIdentity(ownershipIdentity, operation.stagedIdentity)) {
             return [`Staging ownership proof was replaced outside transaction: ${operation.stageOwnershipPath}`];
           }
           if (stageExists && !sameIdentity(await pathIdentity(operation.stagePath), ownershipIdentity)) {
@@ -2524,6 +2643,9 @@ function ensureJournalIdentity(
     }
     if (operation.generatedAgentBackupPath && !isPathWithin(journalDirectory(sourceRoot), operation.generatedAgentBackupPath)) {
       throw new Error(`Migration journal contains an unsafe agent backup path: ${operation.operationId}`);
+    }
+    if (operation.generatedAgentTemporaryPath && !isPathWithin(sourceRoot, operation.generatedAgentTemporaryPath)) {
+      throw new Error(`Migration journal contains an unsafe agent temporary path: ${operation.operationId}`);
     }
     if (operation.stageOwnershipPath
       && operation.stageOwnershipPath !== join(expectedStaging, `${operation.operationId}.ownership`)) {
