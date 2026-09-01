@@ -744,6 +744,12 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function crashAfter(label: string): void {
+  if (process.env.NODE_ENV === 'test' && process.env.SKILLREPO_TEST_CRASH_AFTER === label) {
+    process.kill(process.pid, 'SIGKILL');
+  }
+}
+
 async function persistJournal(journal: MigrationJournal): Promise<void> {
   journal.updatedAt = now();
   const temporary = `${journal.journalPath}.${randomUUID()}.tmp`;
@@ -781,6 +787,7 @@ async function acquireLock(sourceRoot: string, transactionId: string): Promise<v
       `${JSON.stringify({ transactionId, sourceRoot, pid: process.pid, createdAt: now() }, null, 2)}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
+    crashAfter('lock-owner-staged');
     await rename(temporary, path);
   } catch (error) {
     await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
@@ -845,6 +852,7 @@ async function ensureDirectoryPath(path: string, journal: MigrationJournal): Pro
       await persistJournal(journal).catch(() => undefined);
       throw error;
     }
+    crashAfter('directory-created');
     const identity = await pathIdentity(directory);
     if (!identity) throw new Error(`Created migration directory disappeared: ${directory}`);
     journal.creatingDirectories = journal.creatingDirectories.filter(item => item !== directory);
@@ -882,6 +890,7 @@ async function writeStagingMarker(journal: MigrationJournal): Promise<void> {
       { encoding: 'utf8', mode: 0o600 },
     );
     await rename(temporary, journal.stagingRoot);
+    crashAfter('staging-published');
   } catch (error) {
     await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
     throw error;
@@ -1099,6 +1108,7 @@ async function createSkillCompatibilityShim(
   await writeSkillShimMarker(operation, journal, 'creating');
   if (await lexists(operation.source)) throw new Error(`Compatibility source path was recreated externally: ${operation.source}`);
   await rename(operation.skillShimStagePath, operation.source);
+  crashAfter('skill-shim-published');
   operation.skillShim.markerPath = join(operation.source, COMPAT_MARKER);
   operation.skillShimIdentity = await pathIdentity(operation.source);
   if (!operation.skillShimIdentity) throw new Error(`Compatibility directory disappeared after creation: ${operation.source}`);
@@ -1121,6 +1131,7 @@ async function createSkillCompatibilityShim(
     await writeSkillShimMarker(operation, journal, 'creating');
     await persistJournal(journal);
     await symlink(targetChild, sourceChild);
+    crashAfter('skill-compatibility-symlink-created');
     const identity = await pathIdentity(sourceChild);
     if (!identity) throw new Error(`Compatibility link disappeared after creation: ${sourceChild}`);
     operation.compatibilityIdentities[sourceChild] = identity;
@@ -1141,6 +1152,7 @@ async function createFileCompatibilityShim(
   await persistJournal(journal);
   if (await lexists(operation.source)) throw new Error(`Compatibility source path was recreated externally: ${operation.source}`);
   await symlink(operation.target, operation.source);
+  crashAfter('file-compatibility-symlink-created');
   operation.fileCompatibilityCreated = true;
   const identity = await pathIdentity(operation.source);
   if (!identity) throw new Error(`Compatibility link disappeared after creation: ${operation.source}`);
@@ -1306,6 +1318,7 @@ async function createAgentRegistrationLinks(journal: MigrationJournal): Promise<
       link.created = true;
       await persistJournal(journal);
       await symlink(link.target, link.path, 'dir');
+      crashAfter('agent-registration-symlink-created');
       link.identity = await pathIdentity(link.path);
       if (!link.identity) throw new Error(`Agent registration link disappeared after creation: ${link.path}`);
       await persistJournal(journal);
@@ -1573,7 +1586,7 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
     }
   }
 
-  if (operation.kind === 'skill') issues.push(...await removeSkillShim(operation, journal));
+  if (operation.kind === 'skill' && operation.skillShim) issues.push(...await removeSkillShim(operation, journal));
   else if (!(operation.kind === 'agent' && operation.target.endsWith('.md'))) issues.push(...await removeFileCompatibility(operation));
   if (issues.length) return issues;
 
@@ -2379,6 +2392,7 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
   }
   const transactionId = randomUUID();
   const journal = await createJournal(transactionId, planPath, planFingerprint, sourceRoot, targetRoot, preflightResult, configSnapshot);
+  crashAfter('journal-created');
   let lockAcquired = false;
   try {
     // Persist the transaction identity before taking the lock so a crash in
