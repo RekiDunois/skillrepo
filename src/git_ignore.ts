@@ -194,14 +194,15 @@ export async function probeIgnoredPaths(
   // filesystem cannot change ignore semantics.
   const ignoreCase = await deriveTargetIgnoreCase(repoRoot, unique);
   const gitDir = await createOracleGitDir(repoRoot);
+  const cleanEnv = withoutInheritedRepositoryContext(runtime.env);
   try {
-    const init = await runProcess(runtime.gitPath, ['init', '--bare', '--quiet', gitDir], { env: runtime.env });
+    const init = await runProcess(runtime.gitPath, ['init', '--bare', '--quiet', gitDir], { env: cleanEnv });
     if (init.code !== 0) {
       throw new Error(`Git ignore oracle initialization failed: ${init.stderr.trim() || init.stdout.trim() || `exit ${init.code}`}`);
     }
 
     const env = {
-      ...runtime.env,
+      ...cleanEnv,
       GIT_DIR: gitDir,
       GIT_WORK_TREE: repoRoot,
     };
