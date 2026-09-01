@@ -9,6 +9,7 @@
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build",
     "test": "npm run build && node --test dist/test/**/*.test.js",
+    "test:opencode-runtime": "npm run build && node scripts/opencode-runtime-test.mjs",
     "inventory:opencode": "node scripts/export-opencode-structure.mjs"
   },
   "engines": { "node": ">=22" },

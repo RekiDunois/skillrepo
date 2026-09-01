@@ -72,4 +72,4 @@ npm install
 npm test
 ```
 
-GitHub Actions additionally installs the real OpenCode CLI, registers a fixture repository, and verifies discovery through OpenCode itself.
+GitHub Actions additionally installs the pinned OpenCode CLI, registers a fixture repository, and runs two runtime checks. The existing `debug skill` and `agent list` commands are CLI discovery diagnostics only; `npm run test:opencode-runtime` separately compares full TUI/Web `/skill` state and executes the real `skill()` tool in both runtimes against a deterministic local provider.

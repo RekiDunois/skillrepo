@@ -23,7 +23,7 @@ jobs:
           npm install -g "./$package"
           command -v skillrepo
       - name: Install OpenCode
-        run: npm install -g opencode-ai
+        run: npm install -g opencode-ai@1.18.25
       - name: Build external agent symlink regression fixture
         shell: bash
         env:
@@ -72,7 +72,7 @@ jobs:
           skillrepo register "$RUNNER_TEMP/fixture-repo"
           skillrepo register "$RUNNER_TEMP/fixture-repo"
           skillrepo doctor
-      - name: Verify initial discovery through OpenCode
+      - name: Verify initial CLI discovery through OpenCode
         shell: bash
         env:
           OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode
@@ -211,7 +211,7 @@ jobs:
           test -f "$RUNNER_TEMP/migration-opencode/skill/migrated-skill/SKILL.md"
           test -f "$RUNNER_TEMP/migration-opencode/agents/migrated-helper.py"
           test ! -e "$RUNNER_TEMP/migration-repos/migrated-repo/skills/migrated-skill/SKILL.md"
-      - name: Verify migrated components through OpenCode
+      - name: Verify migrated components through OpenCode CLI discovery
         shell: bash
         env:
           OPENCODE_CONFIG_DIR: ${{ runner.temp }}/migration-opencode
@@ -234,6 +234,10 @@ jobs:
           "$RUNNER_TEMP/migration-opencode/skill/migrated-skill/scripts/run.sh" | grep -F 'migrated-runtime-ok'
           python "$RUNNER_TEMP/migration-opencode/agents/migrated-helper.py" | grep -F 'migrated-agent-resource-ok'
           skillrepo doctor
+      - name: Verify OpenCode TUI and Web runtime boundaries
+        env:
+          OPENCODE_EXPECTED_VERSION: 1.18.25
+        run: npm run test:opencode-runtime
       - name: Verify migration resume through packaged CLI
         shell: bash
         env:
