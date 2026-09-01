@@ -56,3 +56,28 @@ test("migration runtime verification preserves the user global plugin directory"
     /symlink\(originalPlugins,\s*join\(configDir, ['"]plugins['"]\)/,
   );
 });
+
+test("migration runtime verification preserves custom OPENCODE_CONFIG file semantics", () => {
+  const start = migrationRuntimeScript.indexOf("async function verify(context)");
+  const end = migrationRuntimeScript.indexOf("async function main()");
+  assert.ok(start >= 0 && end > start);
+  const body = migrationRuntimeScript.slice(start, end);
+
+  assert.match(body, /env\.OPENCODE_CONFIG\s*=\s*injected\.path/);
+});
+
+test("migration runtime verification keeps config files and resource directories separate", () => {
+  assert.doesNotMatch(
+    migrationRuntimeScript,
+    /join\(dirname\(originalPath\), ['"]plugins['"]\)/,
+  );
+  assert.doesNotMatch(
+    migrationRuntimeScript,
+    /join\(dirname\(originalPath\), ['"]agents['"]\)/,
+  );
+  assert.match(
+    migrationRuntimeScript,
+    /join\(originalResourceDir, ['"]plugins['"]\)/,
+  );
+  assert.match(migrationRuntimeScript, /OPENCODE_CONFIG_DIR/);
+});

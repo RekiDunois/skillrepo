@@ -2,7 +2,7 @@ import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { parse } from 'jsonc-parser'
 
@@ -216,8 +216,8 @@ async function executeSkill(runtimeUrl, projectDir, skill, mock) {
 }
 
 async function configPathFromEnv(env) {
-  if (env.OPENCODE_CONFIG) return env.OPENCODE_CONFIG
-  const dir = env.OPENCODE_CONFIG_DIR || join(env.HOME || tmpdir(), '.config', 'opencode')
+  if (env.OPENCODE_CONFIG) return resolve(env.OPENCODE_CONFIG)
+  const dir = resolve(env.OPENCODE_CONFIG_DIR || join(env.HOME || tmpdir(), '.config', 'opencode'))
   for (const name of ['opencode.jsonc', 'opencode.json']) {
     try { await stat(join(dir, name)); return join(dir, name) } catch {}
   }
@@ -226,6 +226,7 @@ async function configPathFromEnv(env) {
 
 async function makeInjectedConfig(context, root, baseEnv, mockBaseUrl) {
   const originalPath = await configPathFromEnv(baseEnv)
+  const originalResourceDir = resolve(baseEnv.OPENCODE_CONFIG_DIR || join(baseEnv.HOME || tmpdir(), '.config', 'opencode'))
   let original = '{}\n'
   try { original = await readFile(originalPath, 'utf8') } catch {}
   const errors = []
@@ -246,17 +247,19 @@ async function makeInjectedConfig(context, root, baseEnv, mockBaseUrl) {
   await mkdir(configDir, { recursive: true })
   const path = join(configDir, basename(originalPath))
   await writeFile(path, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
-  const originalAgents = join(dirname(originalPath), 'agents')
+  const originalAgents = join(originalResourceDir, 'agents')
   try { await stat(originalAgents); await symlink(originalAgents, join(configDir, 'agents'), 'dir') } catch {}
-  const originalPlugins = join(dirname(originalPath), 'plugins')
+  const originalPlugins = join(originalResourceDir, 'plugins')
   try { await stat(originalPlugins); await symlink(originalPlugins, join(configDir, 'plugins'), 'dir') } catch {}
-  for (const entry of await readdir(dirname(originalPath), { withFileTypes: true })) {
-    if (entry.name === basename(originalPath) || entry.name === 'opencode.json' || entry.name === 'opencode.jsonc'
-      || entry.name === 'agents' || entry.name === 'plugins') continue
-    try {
-      await symlink(join(dirname(originalPath), entry.name), join(configDir, entry.name), entry.isDirectory() ? 'dir' : 'file')
-    } catch {}
-  }
+  try {
+    for (const entry of await readdir(originalResourceDir, { withFileTypes: true })) {
+      if (entry.name === basename(originalPath) || entry.name === 'opencode.json' || entry.name === 'opencode.jsonc'
+        || entry.name === 'agents' || entry.name === 'plugins') continue
+      try {
+        await symlink(join(originalResourceDir, entry.name), join(configDir, entry.name), entry.isDirectory() ? 'dir' : 'file')
+      } catch {}
+    }
+  } catch {}
   return { path, configDir, originalPath, config }
 }
 
@@ -301,7 +304,7 @@ async function verify(context) {
     report.activeConfigPaths = [context.configPath, injected.path]
     report.plugins = Array.isArray(injected.config.plugin) ? injected.config.plugin.map(value => typeof value === 'string' ? value : '[configured]') : []
     const env = { ...process.env, OPENCODE_CONFIG_DIR: injected.configDir }
-    delete env.OPENCODE_CONFIG
+    env.OPENCODE_CONFIG = injected.path
     report.cliDiscovery = await runCli(executable, ['debug', 'skill'], env)
     report.cliAgents = await runCli(executable, ['agent', 'list'], env)
     report.agentInventory = context.expectedAgentNames.map(name => ({ name, present: report.cliAgents.stdout.includes(name) }))
