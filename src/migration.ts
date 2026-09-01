@@ -77,6 +77,7 @@ export type MigrationPhase =
 export type MigrationStatus =
   | 'in-progress'
   | 'moved-uncommitted'
+  | 'rollback-in-progress'
   | 'committed'
   | 'rollback-complete'
   | 'rollback-incomplete'
@@ -85,7 +86,8 @@ export type MigrationStatus =
 type OperationState = 'pending' | 'staged' | 'prepared' | 'moved' | 'complete';
 
 type PathIdentity = { dev: number; ino: number };
-type CreatedDirectory = { path: string; identity: PathIdentity };
+type CreatedDirectory = { path: string; identity: PathIdentity; markerPath?: string };
+type CreatingDirectory = { path: string; temporary: string };
 
 type JournalOperation = MoveOperation & {
   operationId: string;
@@ -142,7 +144,7 @@ type MigrationJournal = {
   repositories: string[];
   operations: JournalOperation[];
   createdDirectories: CreatedDirectory[];
-  creatingDirectories?: string[];
+  creatingDirectories?: CreatingDirectory[];
   prospectiveConfigText: string;
   prospectiveConfigFingerprint: string;
   configDirectoryExisted: boolean;
@@ -157,6 +159,7 @@ type MigrationJournal = {
     newFingerprint?: string;
     newIdentity?: PathIdentity;
     newMode?: number;
+    rollbackState?: 'pending' | 'restoring' | 'restored';
   };
   registration?: JournalRegistration;
 };
@@ -198,6 +201,7 @@ const JOURNAL_DIRECTORY = '.skillrepo-migrations';
 const STAGING_DIRECTORY = '.skillrepo-migration-staging';
 const LOCK_DIRECTORY = '.skillrepo-migration.lock';
 const STAGING_MARKER = '.owner.json';
+const DIRECTORY_MARKER = '.skillrepo-directory-owner.json';
 const COMPAT_MARKER = '.skillrepo-compat.json';
 const ABSENT_FINGERPRINT = 'absent';
 
@@ -740,6 +744,11 @@ function stagingTemporaryPath(journal: MigrationJournal): string {
   return join(stagingParent(journal.sourceRoot), `.${journal.transactionId}.tmp`);
 }
 
+function directoryTemporaryPath(journal: MigrationJournal, path: string): string {
+  const suffix = createHash('sha256').update(path).digest('hex').slice(0, 16);
+  return join(dirname(path), `.${basename(path)}.${journal.transactionId}.${suffix}.tmp`);
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -841,22 +850,35 @@ async function ensureDirectoryPath(path: string, journal: MigrationJournal): Pro
 
   for (const directory of missing.reverse()) {
     journal.creatingDirectories ??= [];
-    if (!journal.creatingDirectories.includes(directory)) {
-      journal.creatingDirectories.push(directory);
+    const temporary = directoryTemporaryPath(journal, directory);
+    if (!journal.creatingDirectories.some(item => item.path === directory)) {
+      journal.creatingDirectories.push({ path: directory, temporary });
       await persistJournal(journal);
     }
+    if (await lexists(temporary)) throw new Error(`Migration directory staging path already exists: ${temporary}`);
     try {
-      await mkdir(directory);
+      await mkdir(temporary, { mode: 0o700 });
+      await writeFile(
+        join(temporary, DIRECTORY_MARKER),
+        `${JSON.stringify({ transactionId: journal.transactionId, path: directory }, null, 2)}\n`,
+        { encoding: 'utf8', mode: 0o600 },
+      );
+      if (await lexists(directory)) throw new Error(`Migration directory was created externally: ${directory}`);
+      await rename(temporary, directory);
+      crashAfter('directory-published');
     } catch (error) {
-      journal.creatingDirectories = journal.creatingDirectories.filter(item => item !== directory);
+      await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+      journal.creatingDirectories = journal.creatingDirectories.filter(item => item.path !== directory);
       await persistJournal(journal).catch(() => undefined);
       throw error;
     }
-    crashAfter('directory-created');
     const identity = await pathIdentity(directory);
     if (!identity) throw new Error(`Created migration directory disappeared: ${directory}`);
-    journal.creatingDirectories = journal.creatingDirectories.filter(item => item !== directory);
-    journal.createdDirectories.push({ path: directory, identity });
+    const markerPath = join(directory, DIRECTORY_MARKER);
+    journal.creatingDirectories = journal.creatingDirectories.filter(item => item.path !== directory);
+    journal.createdDirectories.push({ path: directory, identity, markerPath });
+    await persistJournal(journal);
+    await unlink(markerPath);
     await persistJournal(journal);
   }
 }
@@ -952,21 +974,33 @@ async function recoverCreatingDirectories(journal: MigrationJournal): Promise<vo
   const creating = journal.creatingDirectories ?? [];
   if (!creating.length) return;
   let changed = false;
-  for (const path of creating) {
+  const remaining: CreatingDirectory[] = [];
+  for (const item of creating) {
+    const path = item.path;
     const pathStat = await tryLstat(path);
     if (!pathStat) {
-      changed = true;
+      if (await lexists(item.temporary)) remaining.push(item);
+      else changed = true;
       continue;
     }
     if (!pathStat.isDirectory() || pathStat.isSymbolicLink()) {
       throw new Error(`Interrupted created directory is not a real directory: ${path}`);
     }
+    const markerPath = join(path, DIRECTORY_MARKER);
+    const markerStat = await tryLstat(markerPath);
+    if (!markerStat?.isFile() || markerStat.isSymbolicLink()) {
+      throw new Error(`Interrupted created directory ownership is not provable: ${path}`);
+    }
+    const metadata = await readJson(markerPath);
+    if (metadata.transactionId !== journal.transactionId || metadata.path !== path) {
+      throw new Error(`Interrupted created directory owner mismatch: ${path}`);
+    }
     if (!journal.createdDirectories.some(created => created.path === path)) {
-      journal.createdDirectories.push({ path, identity: identityFromStat(pathStat) });
+      journal.createdDirectories.push({ path, identity: identityFromStat(pathStat), markerPath });
     }
     changed = true;
   }
-  journal.creatingDirectories = [];
+  journal.creatingDirectories = remaining;
   if (changed || creating.length) await persistJournal(journal);
 }
 
@@ -1418,6 +1452,7 @@ async function registerTransaction(
   }
   await assertAgentRegistrationLinksCurrent(journal);
   await persistJournal(journal);
+  crashAfter('config-written');
 }
 
 async function verifySkillShim(operation: JournalOperation, journal: MigrationJournal): Promise<string[]> {
@@ -1507,6 +1542,7 @@ async function removeSkillShim(operation: JournalOperation, journal: MigrationJo
       continue;
     }
     await unlink(path);
+    crashAfter('rollback-compatibility-link-removed');
   }
 
   const remaining = await readdir(operation.source);
@@ -1544,6 +1580,7 @@ async function removeFileCompatibility(operation: JournalOperation): Promise<str
       continue;
     }
     await unlink(path);
+    crashAfter('rollback-compatibility-link-removed');
   }
   return issues;
 }
@@ -1567,6 +1604,7 @@ async function removeAgentRegistrationLinks(journal: MigrationJournal): Promise<
       continue;
     }
     await unlink(link.path);
+    crashAfter('rollback-agent-link-removed');
   }
   return issues;
 }
@@ -1602,6 +1640,7 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
       await rm(operation.target, { recursive: true, force: true });
     } else {
       await rename(operation.target, operation.source);
+      crashAfter('rollback-target-restored');
     }
   } else if (stageExists) {
     if (!(await stagedContentIsOwned(operation))) return [`Staging content was modified outside transaction: ${operation.stagePath}`];
@@ -1614,6 +1653,7 @@ async function restoreMovedOperation(operation: JournalOperation, journal: Migra
       await rm(operation.stagePath, { recursive: true, force: true });
     } else {
       await rename(operation.stagePath, operation.source);
+      crashAfter('rollback-target-restored');
     }
   } else if (!(await lexists(operation.source))) {
     return [`Cannot restore migration source: ${operation.source}`];
@@ -1650,12 +1690,55 @@ async function cleanCreatedDirectories(journal: MigrationJournal): Promise<strin
       issues.push(`Created directory was recreated externally: ${path}`);
       continue;
     }
+    if (created.markerPath && await lexists(created.markerPath)) {
+      const markerStat = await tryLstat(created.markerPath);
+      if (!markerStat?.isFile() || markerStat.isSymbolicLink()) {
+        issues.push(`Created directory ownership marker was replaced externally: ${created.markerPath}`);
+        continue;
+      }
+      const metadata = await readJson(created.markerPath);
+      if (metadata.path !== path || metadata.transactionId !== journal.transactionId) {
+        issues.push(`Created directory ownership marker mismatch: ${created.markerPath}`);
+        continue;
+      }
+      await unlink(created.markerPath);
+    }
     const entries = await readdir(path);
     if (entries.length) {
       issues.push(`Created directory is not empty during rollback: ${path}`);
       continue;
     }
     await rm(path, { recursive: true });
+  }
+  return issues;
+}
+
+async function cleanCreatingDirectoryTemporaries(journal: MigrationJournal): Promise<string[]> {
+  const issues: string[] = [];
+  for (const item of journal.creatingDirectories ?? []) {
+    if (!(await lexists(item.temporary))) continue;
+    const temporaryStat = await tryLstat(item.temporary);
+    if (!temporaryStat?.isDirectory() || temporaryStat.isSymbolicLink()) {
+      issues.push(`Migration directory temporary path is not a real directory: ${item.temporary}`);
+      continue;
+    }
+    const markerPath = join(item.temporary, DIRECTORY_MARKER);
+    if (await lexists(markerPath)) {
+      const markerStat = await tryLstat(markerPath);
+      if (!markerStat?.isFile() || markerStat.isSymbolicLink()) {
+        issues.push(`Migration directory temporary marker is not a regular file: ${markerPath}`);
+        continue;
+      }
+      const metadata = await readJson(markerPath);
+      if (metadata.transactionId !== journal.transactionId || metadata.path !== item.path) {
+        issues.push(`Migration directory temporary owner mismatch: ${item.temporary}`);
+        continue;
+      }
+    } else if ((await readdir(item.temporary)).length > 0) {
+      issues.push(`Unknown files remain in migration directory temporary path: ${item.temporary}`);
+      continue;
+    }
+    await rm(item.temporary, { recursive: true, force: true });
   }
   return issues;
 }
@@ -1724,9 +1807,17 @@ async function rollbackConfig(journal: MigrationJournal): Promise<string[]> {
     return [error instanceof Error ? error.message : String(error)];
   }
 
+  if (journal.config.rollbackState === 'restored') {
+    if (current.fingerprint === snapshot.fingerprint && current.mode === snapshot.mode) return [];
+    return [`OpenCode config changed after rollback: ${snapshot.path}`];
+  }
+
   if (current.fingerprint === snapshot.fingerprint) {
-    if ((sameIdentity(current.identity, snapshot.identity) || !current.identity && !snapshot.identity)
-      && current.mode === snapshot.mode) return [];
+    if (current.mode === snapshot.mode) {
+      journal.config.rollbackState = 'restored';
+      await persistJournal(journal);
+      return [];
+    }
     return [`OpenCode config was replaced outside transaction; refusing rollback: ${snapshot.path}`];
   }
   if (!journal.config.changed || !journal.config.newFingerprint) {
@@ -1744,7 +1835,12 @@ async function rollbackConfig(journal: MigrationJournal): Promise<string[]> {
   }
 
   try {
+    journal.config.rollbackState = 'restoring';
+    await persistJournal(journal);
     await restoreOpenCodeConfig(snapshot, journal.config.newFingerprint, current.identity);
+    crashAfter('rollback-config-restored');
+    journal.config.rollbackState = 'restored';
+    await persistJournal(journal);
     return [];
   } catch (error) {
     return [error instanceof Error ? error.message : String(error)];
@@ -1768,6 +1864,7 @@ async function rollbackTransaction(journal: MigrationJournal): Promise<{ complet
   if (journal.status === 'rollback-complete') return { complete: true, issues: [] };
   const issues: string[] = [];
   journal.phase = 'rollback';
+  journal.status = 'rollback-in-progress';
   await persistJournal(journal);
 
   try {
@@ -1787,6 +1884,7 @@ async function rollbackTransaction(journal: MigrationJournal): Promise<{ complet
     }
   }
   issues.push(...await cleanStaging(journal));
+  issues.push(...await cleanCreatingDirectoryTemporaries(journal));
   issues.push(...await cleanCreatedDirectories(journal));
   issues.push(...await cleanConfigDirectory(journal));
 
@@ -1988,6 +2086,7 @@ function journalMatchesPlan(
 function journalNeedsRecovery(journal: MigrationJournal): boolean {
   return journal.status === 'in-progress'
     || journal.status === 'moved-uncommitted'
+    || journal.status === 'rollback-in-progress'
     || journal.status === 'rollback-incomplete';
 }
 
@@ -2132,6 +2231,7 @@ async function createJournal(
       originalIdentity: configSnapshot.identity,
       mode: configSnapshot.mode,
       changed: false,
+      rollbackState: 'pending',
     },
   };
   await persistJournal(journal);
@@ -2270,7 +2370,7 @@ function ensureJournalIdentity(
   const registrationDirectory = opencodeConfigDir();
   const createdDirectories = [
     ...journal.createdDirectories.map(created => created.path),
-    ...(journal.creatingDirectories ?? []),
+    ...(journal.creatingDirectories ?? []).map(created => created.path),
   ];
   if (createdDirectories.some(path => (
     !isPathWithin(targetRoot, path)
@@ -2323,6 +2423,17 @@ async function resumeOrRecover(
   }
   if (journal.status === 'rollback-complete' || journal.status === 'preflight-failed') {
     throw new Error(`Migration transaction ${journal.transactionId} is already ${journal.status} and cannot be resumed`);
+  }
+  if (journal.status === 'rollback-in-progress') {
+    const owner = await lockOwner(journal.sourceRoot);
+    if (owner && owner !== journal.transactionId) throw new Error(`Migration source root is locked by transaction ${owner}`);
+    if (!owner) await acquireLock(journal.sourceRoot, journal.transactionId);
+    const rollback = await rollbackTransaction(journal);
+    const status = rollback.complete ? 'rollback-complete' : 'rollback-incomplete';
+    throw new Error(
+      `Migration transaction ${journal.transactionId} (journal ${journal.journalPath}) resumed rollback: ${status}`
+      + (rollback.issues.length ? `\n${rollback.issues.join('\n')}` : ''),
+    );
   }
   await validateInterruptedState(journal);
   if (options.dryRun) return resultFromJournal(journal, options, []);

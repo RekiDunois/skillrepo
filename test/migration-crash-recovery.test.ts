@@ -42,12 +42,17 @@ async function fixture(): Promise<{
   return { root, sourceRoot, targetRoot, planPath };
 }
 
-async function runCrash(f: Awaited<ReturnType<typeof fixture>>, label: string): Promise<void> {
+async function runCrash(
+  f: Awaited<ReturnType<typeof fixture>>,
+  label: string,
+  resume = false,
+): Promise<void> {
   const migrationUrl = pathToFileURL(join(process.cwd(), 'dist', 'src', 'migration.js')).href;
   const script = `import { applyMigration } from ${JSON.stringify(migrationUrl)};
 await applyMigration({
   planPath: ${JSON.stringify(f.planPath)},
   targetRoot: ${JSON.stringify(f.targetRoot)},
+  resume: ${resume},
   verify: false,
 });`;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
@@ -86,7 +91,7 @@ const CRASH_POINTS = [
   'journal-created',
   'lock-owner-staged',
   'staging-published',
-  'directory-created',
+  'directory-published',
   'skill-shim-published',
   'skill-compatibility-symlink-created',
   'file-compatibility-symlink-created',
@@ -139,5 +144,33 @@ test('migration rejects a pre-existing staging parent symlink', async () => {
     await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
   } finally {
     await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('migration rollback resumes after rollback itself is killed', { skip: process.platform === 'win32' }, async t => {
+  const cases = [
+    { initial: 'config-written', rollback: 'rollback-config-restored' },
+    { initial: 'agent-registration-symlink-created', rollback: 'rollback-agent-link-removed' },
+    { initial: 'file-compatibility-symlink-created', rollback: 'rollback-target-restored' },
+  ] as const;
+
+  for (const scenario of cases) {
+    await t.test(`${scenario.initial} -> ${scenario.rollback}`, async () => {
+      const f = await fixture();
+      try {
+        await runCrash(f, scenario.initial);
+        await runCrash(f, scenario.rollback, true);
+        await withConfigDir(f.sourceRoot, async () => {
+          await assert.rejects(
+            () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+            /rollback-complete/,
+          );
+        });
+        await access(join(f.sourceRoot, 'skill', 'alpha', 'SKILL.md'));
+        await assert.rejects(access(join(f.targetRoot, 'demo-repo')));
+      } finally {
+        await rm(f.root, { recursive: true, force: true });
+      }
+    });
   }
 });
