@@ -3309,6 +3309,12 @@ async function resumeOrRecover(
       });
       const failures = verification.filter(result => !result.ok);
       if (failures.length) throw new Error(`OpenCode discovery verification failed:\n${failures.map(result => `${result.command}: ${result.stderr.trim() || 'verification failed'}`).join('\n')}`);
+      await runRuntimeVerification(
+        journal,
+        options,
+        'final-runtime-verification',
+        journal.operations.filter(operation => operation.kind === 'skill'),
+      );
     }
     await cleanCommittedSecrets(journal);
     if (owner === journal.transactionId) await releaseLock(journal.sourceRoot, journal.transactionId, journal.lockReleaseToken);
