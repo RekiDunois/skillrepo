@@ -115,3 +115,14 @@ test('doctor accepts configured skills present in OpenCode discovery', async () 
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test('doctor does not count a skill ID mentioned in another discovery entry as discovered', async () => {
+  const fixture = await makeSkillDiscoveryFixture("'alpha description-mentions-beta'");
+  try {
+    const result = await withDoctorEnv(fixture.configDir, fixture.binDir, () => doctor());
+    assert.equal(result.ok, false);
+    assert.ok(result.issues.some(issue => issue.includes('missing configured skill IDs: beta')));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
