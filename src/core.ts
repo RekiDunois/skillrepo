@@ -79,18 +79,48 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
+function isSkillUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+function configuredSkillPaths(data: Record<string, unknown>): string[] {
+  const value = data.skills;
+  if (Array.isArray(value)) return stringArray(value).filter(path => !isSkillUrl(path));
+  if (value && typeof value === 'object') {
+    return stringArray((value as Record<string, unknown>).paths);
+  }
+  return [];
+}
+
+function configuredSkillUrls(data: Record<string, unknown>): string[] {
+  const value = data.skills;
+  if (Array.isArray(value)) return stringArray(value).filter(isSkillUrl);
+  if (value && typeof value === 'object') {
+    return stringArray((value as Record<string, unknown>).urls);
+  }
+  return [];
+}
+
 async function updateSkills(configPath: string, updater: (skills: string[]) => string[]): Promise<void> {
   const existed = await exists(configPath);
   const { text, data } = await readConfig(configPath);
-  const current = stringArray(data.skills);
+  const current = configuredSkillPaths(data);
+  const legacyArray = Array.isArray(data.skills);
+  const currentUrls = configuredSkillUrls(data);
   const next = updater(current);
 
-  if (current.length === next.length && current.every((value, index) => value === next[index])) return;
+  if (!legacyArray && current.length === next.length && current.every((value, index) => value === next[index])) return;
   if (!existed && next.length === 0) return;
 
-  const edits = modify(text, ['skills'], next, {
-    formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
-  });
+  // OpenCode 1.18 uses skills.paths; convert the old array form if present.
+  const edits = modify(
+    text,
+    legacyArray ? ['skills'] : ['skills', 'paths'],
+    legacyArray ? { paths: next, urls: currentUrls } : next,
+    {
+      formattingOptions: { insertSpaces: true, tabSize: 2, eol: '\n' },
+    },
+  );
   await mkdir(dirname(configPath), { recursive: true });
   await writeFile(configPath, applyEdits(text, edits), 'utf8');
 }
@@ -222,7 +252,7 @@ async function registrationState(inventory: RepoInventory): Promise<Registration
   if (inventory.skillsDir) {
     const configPath = opencodeConfigFile();
     const { data } = await readConfig(configPath);
-    skillsRegistered = stringArray(data.skills).some(source => {
+    skillsRegistered = configuredSkillPaths(data).some(source => {
       return resolveConfigSource(source, configPath) === inventory.skillsDir;
     });
   }
@@ -252,7 +282,7 @@ async function staticCollisionIssues(inventory: RepoInventory): Promise<string[]
 
   if (inventory.skillsDir && inventory.skillIds.length) {
     const { data } = await readConfig(configPath);
-    for (const source of stringArray(data.skills)) {
+    for (const source of configuredSkillPaths(data)) {
       const resolved = resolveConfigSource(source, configPath);
       if (!resolved || resolved === inventory.skillsDir || !(await directoryExists(resolved))) continue;
       const existingIds = await collectSkillIds(resolved, false);
@@ -502,7 +532,7 @@ async function doctorStaticIssues(): Promise<string[]> {
     const { data } = await readConfig(configPath);
     const seenSkills = new Map<string, string>();
 
-    for (const source of stringArray(data.skills)) {
+    for (const source of configuredSkillPaths(data)) {
       const resolved = resolveConfigSource(source, configPath);
       if (!resolved) continue;
       if (!(await directoryExists(resolved))) {

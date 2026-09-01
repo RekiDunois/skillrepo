@@ -1,7 +1,7 @@
 # OpenCode migration-analysis snapshot policy
 #
 # This file is intended to be copied to the SOURCE ROOT as `.gitignore`
-# before creating a drive-sync-harness / sync-cli profile.
+# before creating a synchronization profile with the chosen snapshot tool.
 #
 # Goal: preserve config, skills, agents, scripts, references, assets, and
 # other human-authored material while dropping obvious local/generated state.
