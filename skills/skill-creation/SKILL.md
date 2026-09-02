@@ -120,6 +120,30 @@ For a package-layout skill, `.apm/skills/<SKILL_ID>/...` is part of the
 repository-relative resource path. Never use `<repo>/.apm` as the repository
 root.
 
+## Audit Before A Formal Commit
+
+When the repository is Git-managed, perform a complete pre-commit
+publication/privacy audit of every file and line that will be included before a
+formal commit. This is broader than secret scanning. Review for real corpus
+traces or semantic combinations that fingerprint the corpus domain; private
+workflows, benchmark values, internal development or debug records; real people
+or names, email addresses, physical addresses, URLs or links; real institutions
+such as universities, laboratories, research organizations, or companies; and
+values that look like real keys, tags, identifiers, environment-specific links,
+or other deployment-specific data. Also review for real publication venues from
+the source corpus.
+
+Delete or generalize any such material unless it is required for an end user to
+understand the current functional contract. Use generic placeholders for venues,
+institutions, people, identifiers, and environment-specific values. Example
+semantics must not preserve a combination of corpus-domain terms that can
+reconstruct the original corpus fingerprint.
+
+Documentation committed with the skill must describe the final current contract,
+not internal history. Remove or rewrite historical, migration, or evolution
+narratives about how the workflow used to work, which step moved, or how an old
+mechanism became a new one; state only the rule users need now.
+
 Finally, parse the frontmatter, run focused tests and the repository test suite,
 run `skillrepo doctor`, and verify the new ID in the JSON list from
 `opencode debug skill` without passing a skill ID argument. Run the real
