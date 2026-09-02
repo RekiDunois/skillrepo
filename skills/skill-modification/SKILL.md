@@ -100,6 +100,30 @@ Do not report success when a required verification fails. Preserve the failed
 state and explain whether the cause is an unavailable OpenCode binary, config
 ambiguity, an external edit, or a resource problem.
 
+## Audit Before A Formal Commit
+
+When the repository is Git-managed, perform a complete pre-commit
+publication/privacy audit of every file and line included in the formal commit.
+Do not limit this to secrets. Review for real corpus traces or semantic
+combinations that fingerprint the corpus domain; private workflows, benchmark
+values, internal development or debug records; real people or names, email
+addresses, physical addresses, URLs or links; real institutions such as
+universities, laboratories, research organizations, or companies; values that
+look like real keys, tags, identifiers, environment-specific links, or other
+deployment-specific data; and real publication venues used by the source
+corpus.
+
+Delete or generalize anything in those categories unless an end user needs it
+to understand the current functional contract. Use generic placeholders for
+venues, institutions, people, identifiers, and environment-specific values.
+Semantic examples must not retain a combination of corpus-domain terms that can
+reconstruct the original corpus fingerprint.
+
+Documentation must state the final current contract only. Remove or rewrite
+internal history, migration, or evolution narratives about previous workflows,
+steps being moved, or old mechanisms becoming new ones; keep only the rule the
+user needs now.
+
 ## Migration Handoff
 
 Use a migration handoff only when the migration is non-dry-run, committed, and
