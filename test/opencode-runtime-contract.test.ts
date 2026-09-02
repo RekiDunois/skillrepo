@@ -83,17 +83,21 @@ test("runtime verification uses serve instead of opening the default browser", (
   assert.doesNotMatch(migrationRuntimeScript, /\[executable, 'web',/);
 });
 
-test("primary OpenCode CI tracks latest instead of pinning one exact version", () => {
+test("primary OpenCode CI uses a pinned, self-consistent runtime baseline", () => {
+  const install = ciWorkflow.match(/npm install -g opencode-ai@(\d+\.\d+\.\d+)/);
+  assert.ok(install, "the primary runtime compatibility gate must pin an exact OpenCode version");
+  const version = install[1];
   assert.match(
     ciWorkflow,
-    /npm install -g opencode-ai@latest/,
-    "the primary runtime compatibility gate must exercise the current OpenCode release",
+    new RegExp(`OPENCODE_EXPECTED_VERSION:\\s*${version.replaceAll('.', '\\.')}\\b`),
+    "the runtime assertion must expect the exact version installed by CI",
   );
-  assert.doesNotMatch(
+  assert.match(
     ciWorkflow,
-    /OPENCODE_EXPECTED_VERSION/,
-    "the primary runtime compatibility gate must fail on behavior, not an exact version string",
+    /OPENCODE_DISABLE_AUTOUPDATE:\s*true/,
+    "the pinned runtime baseline must disable OpenCode auto-update",
   );
+  assert.doesNotMatch(ciWorkflow, /opencode-ai@latest/);
 });
 
 test("migration runtime verification preserves the user global plugin directory", () => {
