@@ -15,6 +15,10 @@ const runtimeModule = fs.readFileSync(
   path.join(process.cwd(), "src", "runtime.ts"),
   "utf8",
 );
+const ciWorkflow = fs.readFileSync(
+  path.join(process.cwd(), ".github", "workflows", "test.yml"),
+  "utf8",
+);
 
 function functionBody(name: string, nextName: string): string {
   const start = runtimeScript.search(new RegExp(`(?:async\\s+)?function\\s+${name}\\b`));
@@ -77,6 +81,19 @@ test("runtime verification uses serve instead of opening the default browser", (
   assert.doesNotMatch(runtimeScript, /\[context\.executable, 'web',/);
   assert.match(migrationRuntimeScript, /\[executable, 'serve',/);
   assert.doesNotMatch(migrationRuntimeScript, /\[executable, 'web',/);
+});
+
+test("primary OpenCode CI tracks latest instead of pinning one exact version", () => {
+  assert.match(
+    ciWorkflow,
+    /npm install -g opencode-ai@latest/,
+    "the primary runtime compatibility gate must exercise the current OpenCode release",
+  );
+  assert.doesNotMatch(
+    ciWorkflow,
+    /OPENCODE_EXPECTED_VERSION/,
+    "the primary runtime compatibility gate must fail on behavior, not an exact version string",
+  );
 });
 
 test("migration runtime verification preserves the user global plugin directory", () => {
