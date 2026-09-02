@@ -23,7 +23,7 @@ jobs:
           npm install -g "./$package"
           command -v skillrepo
       - name: Install OpenCode
-        run: npm install -g opencode-ai@1.18.25
+        run: npm install -g opencode-ai@latest
       - name: Build external agent symlink regression fixture
         shell: bash
         env:
@@ -248,8 +248,6 @@ jobs:
           python "$RUNNER_TEMP/migration-opencode/agents/migrated-helper.py" | grep -F 'migrated-agent-resource-ok'
           skillrepo doctor
       - name: Verify OpenCode TUI and Web runtime boundaries
-        env:
-          OPENCODE_EXPECTED_VERSION: 1.18.25
         run: npm run test:opencode-runtime
       - name: Verify migration resume through packaged CLI
         shell: bash
