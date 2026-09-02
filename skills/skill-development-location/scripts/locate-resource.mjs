@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { globSync, lstatSync, statSync } from 'node:fs';
+import { globSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -335,17 +335,39 @@ function pathWithin(root, candidate) {
   return relativePath === '' || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
 }
 
-function canonicalSourceRoot(kind, configuredSourceRoot, filePath) {
-  if (pathWithin(configuredSourceRoot, filePath)) return configuredSourceRoot;
-
-  const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
-  let directory = dirname(filePath);
-  while (true) {
-    if (basename(directory) === sourceDirectory) return directory;
-    const parent = dirname(directory);
-    if (parent === directory) break;
-    directory = parent;
+function realDirectory(path) {
+  try {
+    return statSync(path).isDirectory() ? realpathSync(path) : null;
+  } catch {
+    return null;
   }
+}
+
+function hasPackageManifest(repoRoot) {
+  try {
+    const manifestStat = lstatSync(join(repoRoot, 'apm.yml'));
+    return manifestStat.isFile() && !manifestStat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function canonicalSourceRoot(kind, configuredSourceRoot, filePath) {
+  const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
+  const gitRoot = gitValue(dirname(filePath), ['rev-parse', '--show-toplevel']);
+
+  if (gitRoot) {
+    const repoRoot = resolve(gitRoot);
+    if (hasPackageManifest(repoRoot)) {
+      const packageSourceRoot = realDirectory(join(repoRoot, '.apm', sourceDirectory));
+      if (packageSourceRoot && pathWithin(packageSourceRoot, filePath)) return packageSourceRoot;
+    }
+
+    const legacySourceRoot = realDirectory(join(repoRoot, sourceDirectory));
+    if (legacySourceRoot && pathWithin(legacySourceRoot, filePath)) return legacySourceRoot;
+  }
+
+  if (pathWithin(configuredSourceRoot, filePath)) return configuredSourceRoot;
   return configuredSourceRoot;
 }
 
