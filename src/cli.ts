@@ -25,7 +25,7 @@ import { renderSkillModificationHandoff } from './skill_modification_template.js
 import { initRepo } from './init.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo init <dir>\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify] [--template-out <file>]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
+  console.error(`Usage:\n  skillrepo init <dir> [--layout <apm|legacy>]\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify] [--template-out <file>]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
   process.exit(2);
 }
 
@@ -48,8 +48,14 @@ async function main(): Promise<void> {
   if (!command) usage();
 
   if (command === 'init') {
-    if (rest.length !== 1 || rest[0]!.startsWith('-')) usage();
-    const repo = await initRepo(rest[0]!);
+    const { values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      allowNegative: true,
+      options: { layout: { type: 'string', default: 'apm' } },
+    });
+    if (positionals.length !== 1) usage();
+    const repo = await initRepo(positionals[0]!, undefined, values.layout as 'apm' | 'legacy');
     console.log(`Initialized ${repo}`);
     return;
   }

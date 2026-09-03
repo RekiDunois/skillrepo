@@ -8,6 +8,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      OPENCODE_DISABLE_AUTOUPDATE: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,6 +26,17 @@ jobs:
           command -v skillrepo
       - name: Install OpenCode
         run: npm install -g opencode-ai@1.18.25
+      - name: Verify pinned OpenCode package and CLI versions agree
+        shell: bash
+        env:
+          OPENCODE_EXPECTED_VERSION: 1.18.25
+        run: |
+          set -euo pipefail
+          actual="$(opencode --version | tr -d '\r\n')"
+          if [[ "$actual" != "$OPENCODE_EXPECTED_VERSION" ]]; then
+            printf 'OpenCode package/version mismatch: requested %s, CLI reports %s\n' "$OPENCODE_EXPECTED_VERSION" "$actual" >&2
+            exit 1
+          fi
       - name: Build external agent symlink regression fixture
         shell: bash
         env:

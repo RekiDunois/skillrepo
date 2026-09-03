@@ -46,26 +46,71 @@ test('init creates a skeleton for a missing, empty, current, and absolute direct
   const root = await makeTempRoot('skillrepo-init-layout-');
   try {
     const missing = join(root, 'missing', 'repo');
-    let result = await runCli(['init', missing], root);
+    let result = await runCli(['init', '--layout', 'legacy', missing], root);
     assert.equal(result.code, 0, result.stderr);
     await assertInitLayout(missing);
 
     const empty = join(root, 'empty');
     await mkdir(empty);
-    result = await runCli(['init', empty], root);
+    result = await runCli(['init', '--layout', 'legacy', empty], root);
     assert.equal(result.code, 0, result.stderr);
     await assertInitLayout(empty);
 
     const current = join(root, 'current');
     await mkdir(current);
-    result = await runCli(['init', '.'], current);
+    result = await runCli(['init', '--layout', 'legacy', '.'], current);
     assert.equal(result.code, 0, result.stderr);
     await assertInitLayout(current);
 
     const absolute = join(root, 'absolute');
-    result = await runCli(['init', absolute], root);
+    result = await runCli(['init', '--layout', 'legacy', absolute], root);
     assert.equal(result.code, 0, result.stderr);
     await assertInitLayout(absolute);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('init defaults to the package authoring layout', async () => {
+  const root = await makeTempRoot('skillrepo-init-package-');
+  const repo = join(root, 'package-repo');
+  try {
+    const result = await runCli(['init', repo], root);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual((await readdir(repo)).sort(), ['.apm', '.gitignore', 'apm.yml'].sort());
+    assert.deepEqual((await readdir(join(repo, '.apm'))).sort(), ['agents', 'skills'].sort());
+    assert.equal(await readFile(join(repo, '.apm', 'skills', '.gitkeep'), 'utf8'), '');
+    assert.equal(await readFile(join(repo, '.apm', 'agents', '.gitkeep'), 'utf8'), '');
+    assert.equal(await readFile(join(repo, 'apm.yml'), 'utf8'), 'name: "package-repo"\nversion: 0.1.0\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('init keeps YAML scalar-like repository names as strings', async () => {
+  const root = await makeTempRoot('skillrepo-init-yaml-name-');
+  try {
+    for (const name of ['true', 'null', '123']) {
+      const repo = join(root, name);
+      const result = await runCli(['init', repo], root);
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(
+        await readFile(join(repo, 'apm.yml'), 'utf8'),
+        `name: ${JSON.stringify(name)}\nversion: 0.1.0\n`,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('init accepts an explicit legacy layout', async () => {
+  const root = await makeTempRoot('skillrepo-init-legacy-');
+  const repo = join(root, 'legacy-repo');
+  try {
+    const result = await runCli(['init', '--layout', 'legacy', repo], root);
+    assert.equal(result.code, 0, result.stderr);
+    await assertInitLayout(repo);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -76,7 +121,7 @@ test('init resolves its bundled template independently of the caller cwd', async
   const unrelated = join(root, 'unrelated');
   try {
     await mkdir(unrelated);
-    const result = await runCli(['init', './repo'], unrelated);
+    const result = await runCli(['init', '--layout', 'legacy', './repo'], unrelated);
     assert.equal(result.code, 0, result.stderr);
     await assertInitLayout(join(unrelated, 'repo'));
   } finally {
@@ -91,7 +136,7 @@ test('init rejects non-empty directories without changing their contents', async
     await mkdir(repo);
     await writeFile(join(repo, 'keep.txt'), 'keep me\n', 'utf8');
     const before = await readFile(join(repo, 'keep.txt'), 'utf8');
-    const result = await runCli(['init', repo], root);
+    const result = await runCli(['init', '--layout', 'legacy', repo], root);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /empty|non-empty/i);
     assert.deepEqual(await readdir(repo), ['keep.txt']);
@@ -168,7 +213,7 @@ test('skills and agents survive git commit and clone', async () => {
   const repo = join(root, 'repo');
   const clone = join(root, 'clone');
   try {
-    let result = await runCli(['init', repo], root);
+    let result = await runCli(['init', '--layout', 'legacy', repo], root);
     assert.equal(result.code, 0, result.stderr);
     await execFileAsync('git', ['init', '-q', repo]);
     await execFileAsync('git', ['-C', repo, 'add', '.']);

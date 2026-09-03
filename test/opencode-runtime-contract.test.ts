@@ -15,6 +15,10 @@ const runtimeModule = fs.readFileSync(
   path.join(process.cwd(), "src", "runtime.ts"),
   "utf8",
 );
+const ciWorkflow = fs.readFileSync(
+  path.join(process.cwd(), ".github", "workflows", "test.yml"),
+  "utf8",
+);
 
 function functionBody(name: string, nextName: string): string {
   const start = runtimeScript.search(new RegExp(`(?:async\\s+)?function\\s+${name}\\b`));
@@ -66,7 +70,8 @@ test("OpenCode runtime fixture covers init and explicit registration", () => {
   const fixture = functionBody("createFixture", "listProbe");
 
   assert.match(fixture, /\[cli, 'init', repoRoot\]/);
-  assert.match(fixture, /writeFile\(skillPath, skillContent/);
+  assert.match(fixture, /join\(repoRoot, '\.apm', 'skills', SKILL_NAME/);
+  assert.match(fixture, /SKILL_NAMES/);
   assert.match(fixture, /\[cli, 'register', repoRoot\]/);
   assert.doesNotMatch(fixture, /migration.*apply/);
 });
@@ -76,6 +81,43 @@ test("runtime verification uses serve instead of opening the default browser", (
   assert.doesNotMatch(runtimeScript, /\[context\.executable, 'web',/);
   assert.match(migrationRuntimeScript, /\[executable, 'serve',/);
   assert.doesNotMatch(migrationRuntimeScript, /\[executable, 'web',/);
+});
+
+test("primary OpenCode CI uses a pinned, self-consistent runtime baseline", () => {
+  const install = ciWorkflow.match(/npm install -g opencode-ai@(\d+\.\d+\.\d+)/);
+  assert.ok(install, "the primary runtime compatibility gate must pin an exact OpenCode version");
+  const version = install[1];
+  assert.match(
+    ciWorkflow,
+    new RegExp(`OPENCODE_EXPECTED_VERSION:\\s*${version.replaceAll('.', '\\.')}\\b`),
+    "the runtime assertion must expect the exact version installed by CI",
+  );
+  assert.match(
+    ciWorkflow,
+    /OPENCODE_DISABLE_AUTOUPDATE:\s*true/,
+    "the pinned runtime baseline must disable OpenCode auto-update",
+  );
+  assert.doesNotMatch(ciWorkflow, /opencode-ai@latest/);
+});
+
+test("primary CI retains migration packaged-CLI and Windows commit-readiness gates", () => {
+  assert.match(
+    ciWorkflow,
+    /- name: Verify migration commit audit through packaged CLI[\s\S]*?skillrepo migration audit[\s\S]*?COMMIT-READY: YES/,
+    "CI must exercise migration audit through the packaged CLI and assert commit readiness",
+  );
+
+  assert.match(
+    ciWorkflow,
+    /- name: Verify migration ignore through packaged CLI[\s\S]*?skillrepo migration ignore[\s\S]*?--execute/,
+    "CI must retain the packaged-CLI migration ignore regression",
+  );
+
+  assert.match(
+    ciWorkflow,
+    /commit-readiness-windows:\s*[\s\S]*?runs-on:\s*windows-latest[\s\S]*?Run Windows commit-readiness tests/,
+    "CI must retain Windows commit-readiness coverage",
+  );
 });
 
 test("migration runtime verification preserves the user global plugin directory", () => {

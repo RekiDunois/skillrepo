@@ -9,22 +9,29 @@ Load this skill before reading or changing any OpenCode skill or agent. The path
 
 ## Create a new repository or resource
 
-For a completely new skill repository, initialize the repository first:
+For a completely new skill repository, initialize the repository first. The
+default is the standard package authoring layout:
 
 ```bash
 skillrepo init /path/to/new-repo
 ```
 
-`init` creates only the repository skeleton (`.gitignore`, `skills/.gitkeep`,
-and `agents/.gitkeep`). It does not initialize Git, modify OpenCode
-configuration, create symlinks, register the repository, or require OpenCode
-to discover an empty repository. Add the new skill or agent, then explicitly
-run `skillrepo register /path/to/new-repo` when it is ready.
+`init` creates only the package skeleton (`apm.yml` with `name` and
+`version: 0.1.0`, `.apm/skills/.gitkeep`,
+`.apm/agents/.gitkeep`, and `.gitignore`). It does not initialize Git, modify
+OpenCode configuration, create symlinks, register the repository, or require
+OpenCode to discover an empty repository. Add the new skill or agent, then
+explicitly run `skillrepo register /path/to/new-repo` when it is ready. Use
+`skillrepo init --layout legacy /path/to/new-repo` only when legacy layout is
+explicitly requested.
 
-When creating a new resource inside an existing repository, create its
-directory and required frontmatter directly according to that repository's
-conventions. Do not run the locator first: locator is for locating an existing
-resource before editing it, not for proving that a new resource already exists.
+When creating a new resource inside an existing repository, first confirm the
+repository root and inspect its authoring layout. Create its directory and
+required frontmatter directly in the selected source root; do not run the
+locator first because locator is for locating an existing resource before
+editing it. If both supported layouts exist, or neither layout is established,
+stop and ask the user instead of guessing. For the complete new-skill workflow,
+load `skill-creation`.
 
 ## Locate the source first
 
@@ -49,7 +56,7 @@ node /absolute/path/to/skills/skill-development-location/scripts/locate-resource
   --project-root "$(pwd)"
 ```
 
-The locator returns JSON containing the V1-compatible resource `id`, accepted `identifiers`, resolved real `path`, `sourceRoot`, source-relative path, config path, optional frontmatter metadata, and Git state. V1 primary identifiers always win over compatibility aliases. For V1, a skill uses frontmatter `name` when present and an agent uses frontmatter `name` when present; otherwise they fall back to the containing skill directory or the agent's source-relative path. The path-derived ID is also accepted as an alias only when no V1 primary match exists. Legacy `mode/` and `modes/` roots are scanned only at one level, matching V1. Use the returned `path` and `gitRoot`, not a guessed path. A non-zero result means the resource is missing or ambiguous; do not edit until the ambiguity is resolved.
+The locator returns JSON containing the V1-compatible resource `id`, accepted `identifiers`, resolved real `path`, `sourceRoot`, `sourceRelativePath`, `repoRoot`, `layout`, config path, optional frontmatter metadata, and Git state. `repoRoot` is the real repository root used for repository-relative resources; for `.apm/skills`, it is the package repository and never `.apm`. V1 primary identifiers always win over compatibility aliases. For V1, a skill uses frontmatter `name` when present and an agent uses frontmatter `name` when present; otherwise they fall back to the containing skill directory or the agent's source-relative path. The path-derived ID is also accepted as an alias only when no V1 primary match exists. Legacy `mode/` and `modes/` roots are scanned only at one level, matching V1. Use the returned `path`, `repoRoot`, and `gitRoot`, not a guessed path. A non-zero result means the resource is missing or ambiguous; do not edit until the ambiguity is resolved.
 
 Frontmatter `name` is returned as metadata and participates in V1 identity when present. Agents without a `name` field remain locatable by their source-relative path. Nameless skills are rejected because OpenCode V1 does not load them. Path-derived aliases preserve compatibility with newer discovery behavior without taking precedence over V1 names.
 

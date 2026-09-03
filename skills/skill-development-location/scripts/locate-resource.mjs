@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { globSync, lstatSync, statSync } from 'node:fs';
+import { globSync, lstatSync, realpathSync, statSync } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -330,6 +330,79 @@ function gitState(path) {
   };
 }
 
+function pathWithin(root, candidate) {
+  const relativePath = relative(root, candidate);
+  return relativePath === '' || (!isAbsolute(relativePath) && relativePath !== '..' && !relativePath.startsWith(`..${sep}`));
+}
+
+function realDirectory(path) {
+  try {
+    return statSync(path).isDirectory() ? realpathSync(path) : null;
+  } catch {
+    return null;
+  }
+}
+
+function hasPackageManifest(repoRoot) {
+  try {
+    const manifestStat = lstatSync(join(repoRoot, 'apm.yml'));
+    return manifestStat.isFile() && !manifestStat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function canonicalSourceRoot(kind, configuredSourceRoot, filePath) {
+  const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
+  const gitRoot = gitValue(dirname(filePath), ['rev-parse', '--show-toplevel']);
+
+  if (gitRoot) {
+    const repoRoot = resolve(gitRoot);
+    if (hasPackageManifest(repoRoot)) {
+      const packageSourceRoot = realDirectory(join(repoRoot, '.apm', sourceDirectory));
+      if (packageSourceRoot && pathWithin(packageSourceRoot, filePath)) return packageSourceRoot;
+    }
+
+    const legacySourceRoot = realDirectory(join(repoRoot, sourceDirectory));
+    if (legacySourceRoot && pathWithin(legacySourceRoot, filePath)) return legacySourceRoot;
+  }
+
+  if (pathWithin(configuredSourceRoot, filePath)) return configuredSourceRoot;
+  return configuredSourceRoot;
+}
+
+function layoutMetadata(kind, sourceRoot, git) {
+  const realSourceRoot = resolve(sourceRoot);
+  const parent = dirname(realSourceRoot);
+  const packageRoot = dirname(parent);
+  const manifest = join(packageRoot, 'apm.yml');
+  let hasPackageManifest = false;
+  try {
+    const manifestStat = lstatSync(manifest);
+    hasPackageManifest = manifestStat.isFile() && !manifestStat.isSymbolicLink();
+  } catch {
+    // A source root can be a regular OpenCode directory without a package manifest.
+  }
+
+  const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
+  if (basename(realSourceRoot) === sourceDirectory && basename(parent) === '.apm' && hasPackageManifest) {
+    return {
+      repoRoot: git.gitRoot ?? packageRoot,
+      layout: 'apm',
+    };
+  }
+  if (basename(realSourceRoot) === sourceDirectory) {
+    return {
+      repoRoot: git.gitRoot ?? parent,
+      layout: 'skillrepo',
+    };
+  }
+  return {
+    repoRoot: git.gitRoot ?? dirname(realSourceRoot),
+    layout: 'unknown',
+  };
+}
+
 async function locate({ kind, name, config: explicitConfig, projectRoot: explicitProjectRoot }) {
   const configFile = configPath(explicitConfig);
   const data = await readConfig(configFile);
@@ -352,17 +425,22 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
       const metadataName = await frontmatterName(file.path);
       const identifiers = resourceIds(kind, root.path, file.logicalPath, metadataName);
       if (!identifiers.includes(name)) continue;
-      const sourceRelativePath = relative(root.path, file.logicalPath).split(sep).join('/');
+      const configuredSourceRoot = await realpath(root.path);
+      const sourceRoot = canonicalSourceRoot(kind, configuredSourceRoot, file.path);
+      const sourceRelativePath = relative(sourceRoot, file.path).split(sep).join('/');
       const candidate = {
         path: file.path,
         id: identifiers[0],
         identifiers,
         sourceRelativePath,
-        sourceRoot: await realpath(root.path),
+        sourceRoot,
         configuredSource: root.configured,
         frontmatterName: metadataName,
         git: gitState(file.path),
       };
+      const layout = layoutMetadata(kind, candidate.sourceRoot, candidate.git);
+      candidate.repoRoot = layout.repoRoot;
+      candidate.layout = layout.layout;
       if (identifiers[0] === name) primaryCandidates.push(candidate);
       else aliasCandidates.push(candidate);
     }
