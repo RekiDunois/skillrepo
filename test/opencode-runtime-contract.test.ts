@@ -100,6 +100,26 @@ test("primary OpenCode CI uses a pinned, self-consistent runtime baseline", () =
   assert.doesNotMatch(ciWorkflow, /opencode-ai@latest/);
 });
 
+test("primary CI retains migration packaged-CLI and Windows commit-readiness gates", () => {
+  assert.match(
+    ciWorkflow,
+    /- name: Verify migration commit audit through packaged CLI[\s\S]*?skillrepo migration audit[\s\S]*?COMMIT-READY: YES/,
+    "CI must exercise migration audit through the packaged CLI and assert commit readiness",
+  );
+
+  assert.match(
+    ciWorkflow,
+    /- name: Verify migration ignore through packaged CLI[\s\S]*?skillrepo migration ignore[\s\S]*?--execute/,
+    "CI must retain the packaged-CLI migration ignore regression",
+  );
+
+  assert.match(
+    ciWorkflow,
+    /commit-readiness-windows:\s*[\s\S]*?runs-on:\s*windows-latest[\s\S]*?Run Windows commit-readiness tests/,
+    "CI must retain Windows commit-readiness coverage",
+  );
+});
+
 test("migration runtime verification preserves the user global plugin directory", () => {
   assert.match(
     migrationRuntimeScript,
