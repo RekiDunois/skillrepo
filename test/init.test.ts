@@ -5,6 +5,8 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { parse } from 'yaml';
+import { renderOpenApmManifest } from '../src/openapm.js';
 
 const execFileAsync = promisify(execFile);
 const cliPath = resolve('dist/src/cli.js');
@@ -81,7 +83,13 @@ test('init defaults to the package authoring layout', async () => {
     assert.deepEqual((await readdir(join(repo, '.apm'))).sort(), ['agents', 'skills'].sort());
     assert.equal(await readFile(join(repo, '.apm', 'skills', '.gitkeep'), 'utf8'), '');
     assert.equal(await readFile(join(repo, '.apm', 'agents', '.gitkeep'), 'utf8'), '');
-    assert.equal(await readFile(join(repo, 'apm.yml'), 'utf8'), 'name: "package-repo"\nversion: 0.1.0\n');
+    assert.equal(await readFile(join(repo, 'apm.yml'), 'utf8'), renderOpenApmManifest('package-repo'));
+    assert.equal(
+      await readFile(join(repo, 'apm.yml'), 'utf8'),
+      '$schema: "https://microsoft.github.io/apm/specs/schemas/manifest-v0.1.schema.json"\n' +
+        'name: "package-repo"\n' +
+        'version: "0.1.0"\n',
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -94,10 +102,10 @@ test('init keeps YAML scalar-like repository names as strings', async () => {
       const repo = join(root, name);
       const result = await runCli(['init', repo], root);
       assert.equal(result.code, 0, result.stderr);
-      assert.equal(
-        await readFile(join(repo, 'apm.yml'), 'utf8'),
-        `name: ${JSON.stringify(name)}\nversion: 0.1.0\n`,
-      );
+      const manifest = parse(await readFile(join(repo, 'apm.yml'), 'utf8')) as Record<string, unknown>;
+      assert.equal(manifest.name, name);
+      assert.equal(manifest.version, '0.1.0');
+      assert.equal(typeof manifest.version, 'string');
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -111,6 +119,7 @@ test('init accepts an explicit legacy layout', async () => {
     const result = await runCli(['init', '--layout', 'legacy', repo], root);
     assert.equal(result.code, 0, result.stderr);
     await assertInitLayout(repo);
+    await assert.rejects(access(join(repo, 'apm.yml')));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -83,11 +83,26 @@ repo/
         └── .gitkeep
 ```
 
-The generated `apm.yml` contains the minimal current contract fields `name` and
-`version: 0.1.0`; full schema validation is tracked separately in #34.
+The generated `apm.yml` is pinned to the normative OpenAPM v0.1 contract and
+contains exactly three fields, written byte-stably:
+
+```yaml
+$schema: "https://microsoft.github.io/apm/specs/schemas/manifest-v0.1.schema.json"
+name: "example-package"
+version: "0.1.0"
+```
+
+`$schema` selects the normative OpenAPM v0.1 manifest schema, so generated
+manifests do not silently follow the APM working draft. `name` is the target
+directory basename, always written as a YAML string. `version` is the initial
+package version `skillrepo` assigns to new packages — it is `0.1.0` as a
+string, not an OpenAPM spec version. The official v0.1 schema is vendored at
+`vendor/openapm/v0.1/`, and this repository's test suite validates generated
+manifests against it offline; `skillrepo` never invokes the APM CLI.
 
 Use `skillrepo init --layout legacy <dir>` only when the legacy `skills/` and
-`agents/` layout is explicitly required. After adding real skills or agents,
+`agents/` layout is explicitly required. The legacy layout creates no
+`apm.yml`. After adding real skills or agents,
 run `skillrepo register <repo>` explicitly. `init` does not itself make an
 empty repository discoverable by OpenCode.
 
