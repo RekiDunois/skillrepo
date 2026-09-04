@@ -62,13 +62,34 @@ The locator returns JSON containing the V1-compatible resource `id`, accepted `i
 
 Frontmatter `name` is returned as metadata and participates in V1 identity when present. Agents without a `name` field remain locatable by their source-relative path. Nameless skills are rejected because OpenCode V1 does not load them. Path-derived aliases preserve compatibility with newer discovery behavior without taking precedence over V1 names.
 
+## Select the authoring source before editing
+
+Default locator mode is discovery: any matching location in the discovery roots can satisfy it, including runtime deployment copies under `.agents/skills`. Default discovery does not scan legacy `.codex/skills`; those trees are diagnostics in authoring mode only. Discovery output is not source authority. Before modifying an existing skill, run the locator again with `--authoring`:
+
+```bash
+node /absolute/path/to/skills/skill-development-location/scripts/locate-resource.mjs \
+  --kind skill \
+  --name <skill-id> \
+  --project-root "$(pwd)" \
+  --authoring
+```
+
+In authoring mode the locator additionally scans the repository authoring roots derived from `--project-root` (`<git-root>/skills` and `<git-root>/.apm/skills`) and the legacy `.codex/skills` trees, and treats standard `.agents/skills`, `.claude/skills`, and `.codex/skills` locations as consumers instead of editable sources. The successful result carries `selectionMode: "authoring"` and is the only editable source:
+
+- `consumerMatches` entries are runtime/deployment copies with neutral metadata (`layout` is `unknown` and `repoRoot` is `null` for a plain copy); they must not be edited directly.
+- An `authoritative source not found` result means stop and locate, register, or provide the real source repository; it never means "edit the consumer copy".
+- Never select a consumer copy by directory order, timestamp, or Git-state heuristics; a deployment copy inside a Git worktree is still a consumer.
+- A compatibility symlink that resolves into the real authoring source is reported as that source, not as a consumer copy.
+- Multiple genuine authoring sources still fail as `resource is ambiguous`; consumer copies neither create nor resolve that ambiguity.
+- Default locator mode remains useful for discovery diagnostics and is not equivalent to source authority.
+
 ## Plan parallel work
 
 - Split work by independent resource or file boundary, and run independent read-only exploration and validation tasks in parallel.
 - Use multiple foreground agent calls in one message when parallelism is available. Do not use background agents for work that writes files.
 - Assign one owner to each file. Never let two agents edit the same skill, agent, config, or lockfile concurrently.
 - Keep shared changes, dependency updates, generated files, and integration tests in a single sequential owner after parallel work is complete.
-- Before every editing task, each worker must run the locator and report the resolved real path and Git root.
+- Before every editing task, each worker must run the locator (`--authoring` for skills) and report the resolved real path, source identity, and Git root.
 - If the locator reports multiple matches, stop that worker rather than choosing by directory order.
 
 ## Edit safely

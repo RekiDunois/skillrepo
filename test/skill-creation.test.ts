@@ -23,6 +23,12 @@ test('skill-creation documents a layout-aware create-before-edit workflow', asyn
   assert.match(text, /repoRoot|repository root/i);
   assert.match(text, /sourceRoot|source root/i);
   assert.match(text, /skill-development-location/);
+  assert.match(text, /--authoring/);
+  assert.match(text, /selectionMode: "authoring"/);
+  assert.match(text, /consumerMatches/);
+  assert.match(text, /established deployment/);
+  assert.match(text, /apm install/);
+  assert.match(text, /discover or overwrite unknown consumer trees/);
   assert.doesNotMatch(text, /\/Users\/[^\s`]+/);
   assert.doesNotMatch(text, /(?:api[_-]?key|token|cookie|session[_-]?state)\s*:/i);
 });

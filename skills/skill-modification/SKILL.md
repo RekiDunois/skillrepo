@@ -18,23 +18,28 @@ and changes an existing skill, use this workflow first.
 
 1. Run `pwd` and pass that exact returned path to later commands.
 2. Load `skill-development-location` before reading or changing the target.
-3. Run its locator with the explicit skill ID:
+3. Run its locator with the explicit skill ID in authoring mode:
 
 ```bash
 node /absolute/path/to/skills/skill-development-location/scripts/locate-resource.mjs \
   --kind skill \
   --name <skill-id> \
-  --project-root "$(pwd)"
+  --project-root "$(pwd)" \
+  --authoring
 ```
 
 4. Treat the locator's `path`, `sourceRoot`, `sourceRelativePath`, `repoRoot`,
    `layout`, `config`, `frontmatterName`, and `git` fields as the resource
    identity. `repoRoot` is the repository root used for repository-relative
    resources; it is never inferred by taking the parent of `.apm`. The Git root
-   is `git.gitRoot`, and Git ownership is `git.managed`.
-5. If the result is missing or ambiguous, stop and ask for clarification.
-   Never choose a path from a similar directory name, search order, or recent
-   modification time.
+   is `git.gitRoot`, and Git ownership is `git.managed`. The successful
+   authoring result is the only editable source.
+5. If the result is `authoritative source not found`, missing, or ambiguous,
+   stop and ask for clarification. `authoritative source not found` means the
+   only matches are runtime/deployment copies listed in `consumerMatches`;
+   locate, register, or provide the real source repository instead of editing
+   a copy. Never choose a path from a similar directory name, search order, or
+   recent modification time.
 6. If the path is in a compatibility shell, symlink, cache, or generated
    mirror, stop and locate the real Git source instead.
 
@@ -53,6 +58,23 @@ The locator's configuration precedence is authoritative: `OPENCODE_CONFIG`,
 then `OPENCODE_CONFIG_DIR/opencode.jsonc`, then
 `OPENCODE_CONFIG_DIR/opencode.json`, then the default config location. If both
 JSON and JSONC files exist, stop rather than selecting one silently.
+
+## Redeploy Instead Of Editing Copies
+
+`consumerMatches` in an authoring result are runtime/deployment copies. They
+must not be edited directly, and a consumer copy must never be selected by
+directory order, timestamp, or Git-state heuristics.
+
+- If a non-OpenCode deployment is already known from the task or context,
+  redeploy it through its owning package manager instead of editing the copy.
+- For an APM deployment, reuse the known existing scope and target and rerun
+  `apm install`. Do not infer or invent `--global`, `--target`, the package
+  identity, or the install root from the consumer path alone.
+- Verify the consumer after redeploying with the deployment runtime's
+  supported verification. Use APM install/audit/drift tooling only when the
+  owning APM context is actually known.
+- If the provenance or scope is not known, report the consumer match as
+  requiring redeploy; do not overwrite it.
 
 ## Inspect And Edit Safely
 
@@ -84,9 +106,9 @@ passed as `.apm/skills/foo/scripts/run.sh`, not as a path relative to `.apm`.
 
 ## Validate After Editing
 
-1. Run the locator again and confirm the exact target file, `repoRoot`,
-   `layout`, and `sourceRoot` are unchanged. A changed source identity is a
-   failure.
+1. Run the authoring locator again with the same `--authoring` call and confirm
+   the exact target file, `repoRoot`, `layout`, and `sourceRoot` are unchanged.
+   A changed source identity is a failure.
 2. Parse the frontmatter and confirm the expected stable skill ID and field
    types.
 3. Run focused tests, then the target repository's full tests.
@@ -95,6 +117,9 @@ passed as `.apm/skills/foo/scripts/run.sh`, not as a path relative to `.apm`.
    and check the expected ID in the list.
 6. Run `npm run test:opencode-runtime` or the repository equivalent when the
    change affects discovery or model-visible behavior.
+7. When a known non-OpenCode deployment exists for the edited source, redeploy
+   it through its owning package manager as described in
+   "Redeploy Instead Of Editing Copies" and verify the deployed consumer.
 
 Do not report success when a required verification fails. Preserve the failed
 state and explain whether the cause is an unavailable OpenCode binary, config
