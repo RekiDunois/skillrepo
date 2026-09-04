@@ -151,6 +151,54 @@ jobs:
           skillrepo unregister "$RUNNER_TEMP/fixture-repo"
           ! opencode debug skill | grep -F 'fixture-skill'
           ! opencode agent list | grep -F 'fixture-worker'
+      - name: Verify large skill discovery through regular-file transport
+        shell: bash
+        env:
+          OPENCODE_CONFIG_DIR: ${{ runner.temp }}/opencode-large-discovery
+          LARGE_DISCOVERY_INVENTORY: ${{ runner.temp }}/large-discovery-inventory/skills
+          LARGE_DISCOVERY_TARGET: ${{ runner.temp }}/large-discovery-target
+          LARGE_DISCOVERY_CAPTURE: ${{ runner.temp }}/large-discovery-capture.json
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$OPENCODE_CONFIG_DIR" "$LARGE_DISCOVERY_INVENTORY" "$LARGE_DISCOVERY_TARGET/skills/large-target-skill"
+          node <<'EOF'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const sentence = 'synthetic large discovery inventory entry for transport coverage part N ';
+          let description = '';
+          while (description.length < 9 * 1024) description += sentence + description.length + ' ';
+          description = description.slice(0, 9 * 1024);
+          for (let index = 0; index < 128; index += 1) {
+            const id = 'large-inventory-' + String(index).padStart(3, '0');
+            const dir = fs.mkdirSync(path.join(process.env.LARGE_DISCOVERY_INVENTORY, id), { recursive: true });
+            fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: ' + id + '\ndescription: ' + description + '\n---\nLarge inventory fixture.\n');
+          }
+          fs.writeFileSync(
+            path.join(process.env.LARGE_DISCOVERY_TARGET, 'skills', 'large-target-skill', 'SKILL.md'),
+            '---\nname: large-target-skill\ndescription: large discovery registration target\n---\nLarge discovery target.\n',
+          );
+          fs.writeFileSync(
+            path.join(process.env.OPENCODE_CONFIG_DIR, 'opencode.jsonc'),
+            JSON.stringify({ $schema: 'https://opencode.ai/config.json', skills: { paths: [process.env.LARGE_DISCOVERY_INVENTORY] } }, null, 2) + '\n',
+            { mode: 0o600 },
+          );
+          EOF
+          opencode debug skill > "$LARGE_DISCOVERY_CAPTURE"
+          node <<'EOF'
+          const fs = require('node:fs');
+          const capture = process.env.LARGE_DISCOVERY_CAPTURE;
+          const size = fs.statSync(capture).size;
+          const parsed = JSON.parse(fs.readFileSync(capture, 'utf8'));
+          if (!Array.isArray(parsed)) throw new Error('large discovery baseline is not a JSON array');
+          if (size <= 1024 * 1024) throw new Error('large discovery baseline is only ' + size + ' bytes');
+          if (!parsed.some(entry => entry && entry.name === 'large-inventory-000')) throw new Error('inventory fixture missing from discovery baseline');
+          console.log('large discovery baseline: ' + parsed.length + ' entries, ' + size + ' bytes');
+          EOF
+          skillrepo register "$LARGE_DISCOVERY_TARGET"
+          skillrepo doctor
+          skillrepo unregister "$LARGE_DISCOVERY_TARGET"
+          skillrepo doctor
       - name: Build migration fixture
         shell: bash
         run: |
