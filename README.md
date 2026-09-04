@@ -43,6 +43,38 @@ npm uninstall -g skillrepo
 
 The migration commands are for moving an existing OpenCode installation into external repositories; they are not needed for the normal install-and-register flow.
 
+## Install the shipped skills with apm
+
+The repository root carries an `apm.yml` package manifest, so the three
+shipped skills (`skill-creation`, `skill-modification`,
+`skill-development-location`) are also installable with the
+[apm](https://microsoft.github.io/apm/) Agent Package Manager, including into
+agents that `skillrepo register` does not configure, such as Codex. The
+manifest pins no `targets:`; select the harness per install:
+
+```bash
+# from a Git remote, into the current project
+apm install RekiDunois/skillrepo --target codex
+
+# from a local checkout, into the current project
+apm install /path/to/skillrepo --target codex
+
+# user scope (for harnesses apm supports at user scope)
+apm install RekiDunois/skillrepo --target codex --global
+```
+
+Project scope deploys each skill to `.agents/skills/<id>/SKILL.md`, the
+converged directory Codex and OpenCode discover from the working directory up
+to the repository root. User scope deploys to the selected harness's
+user-level skills directory, such as `~/.codex/skills/` for Codex. The
+manifest's `includes:` allowlist restricts packaged content to `skills/`, so
+only the skills ship; local directory installs still copy the checkout into
+the consumer's `apm_modules/` cache.
+
+Pick one discovery path per agent CLI: for OpenCode, either
+`skillrepo register` or `apm install --target opencode`, not both, or the
+same skill IDs are discovered twice. For Codex, use apm.
+
 ## v0 scope
 
 ```bash

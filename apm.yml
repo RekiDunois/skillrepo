@@ -1,0 +1,5 @@
+name: skillrepo
+version: 0.0.1
+description: Register external skill/agent repositories with OpenCode; ships the skill-creation, skill-modification, and skill-development-location skills.
+includes:
+  - skills/
