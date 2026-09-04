@@ -62,7 +62,7 @@ Frontmatter `name` is returned as metadata and participates in V1 identity when 
 
 ## Select the authoring source before editing
 
-Default locator mode is discovery: any matching location can satisfy it, including runtime deployment copies under `.agents/skills` or legacy `.codex/skills`. Discovery output is not source authority. Before modifying an existing skill, run the locator again with `--authoring`:
+Default locator mode is discovery: any matching location in the discovery roots can satisfy it, including runtime deployment copies under `.agents/skills`. Default discovery does not scan legacy `.codex/skills`; those trees are diagnostics in authoring mode only. Discovery output is not source authority. Before modifying an existing skill, run the locator again with `--authoring`:
 
 ```bash
 node /absolute/path/to/skills/skill-development-location/scripts/locate-resource.mjs \
