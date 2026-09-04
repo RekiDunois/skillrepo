@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import { execFile, spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -263,7 +263,63 @@ async function makeInjectedConfig(context, root, baseEnv, mockBaseUrl) {
   return { path, configDir, originalPath, config }
 }
 
+function isSkillDiscoveryCommand(args) {
+  return args.length === 2 && args[0] === 'debug' && args[1] === 'skill'
+}
+
+// `opencode debug skill` exits 0 but only delivers the bytes that fit in a
+// stdout pipe buffer (and execFile additionally caps buffered stdout at 1 MiB),
+// so a large discovery document can never arrive through those transports. A
+// regular-file stdout receives the complete document, so this one command is
+// captured through a private temporary file with restrictive permissions.
+async function runCliWithFileStdout(executable, args, env) {
+  const command = `${executable} ${args.join(' ')}`
+  const directory = await mkdtemp(join(tmpdir(), 'skillrepo-cli-discovery-'))
+  try {
+    const stdoutFile = join(directory, 'skill-discovery.json')
+    const handle = await open(stdoutFile, 'w', 0o600)
+    let stderr = ''
+    let exitCode = null
+    let spawnError
+    try {
+      exitCode = await new Promise((resolvePromise, reject) => {
+        const child = spawn(executable, args, {
+          shell: false,
+          env,
+          stdio: ['ignore', handle.fd, 'pipe'],
+        })
+        const timer = setTimeout(() => {
+          try { child.kill('SIGTERM') } catch {}
+        }, TIMEOUT_MS)
+        timer.unref?.()
+        child.stderr.on('data', chunk => { stderr += String(chunk) })
+        child.on('error', reject)
+        child.on('close', code => {
+          clearTimeout(timer)
+          resolvePromise(code)
+        })
+      })
+    } catch (error) {
+      spawnError = error
+    } finally {
+      await handle.close()
+    }
+    const stdout = await readFile(stdoutFile, 'utf8')
+    return {
+      ok: !spawnError && exitCode === 0,
+      command,
+      stdout,
+      stderr: spawnError ? `${stderr}${spawnError.message}` : stderr,
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+}
+
 async function runCli(executable, args, env) {
+  if (isSkillDiscoveryCommand(args)) {
+    return runCliWithFileStdout(executable, args, env)
+  }
   try {
     const result = await execFileAsync(executable, args, { env, timeout: TIMEOUT_MS })
     return { ok: true, command: `${executable} ${args.join(' ')}`, stdout: result.stdout, stderr: result.stderr }

@@ -120,6 +120,44 @@ test("primary CI retains migration packaged-CLI and Windows commit-readiness gat
   );
 });
 
+test("migration runtime verification captures debug skill discovery through a regular file", () => {
+  assert.match(
+    migrationRuntimeScript,
+    /function isSkillDiscoveryCommand\(args\) \{\s*\n\s*return args\.length === 2 && args\[0\] === ["']debug["'] && args\[1\] === ["']skill["']/,
+    "the verifier must select exactly the debug skill command for file-backed stdout",
+  );
+  assert.match(
+    migrationRuntimeScript,
+    /if \(isSkillDiscoveryCommand\(args\)\) \{\s*\n\s*return runCliWithFileStdout\(executable, args, env\)\s*\n\s*\}/,
+    "runCli must delegate the skill discovery command to the file-backed transport",
+  );
+  assert.match(
+    migrationRuntimeScript,
+    /open\(stdoutFile, 'w', 0o600\)/,
+    "discovery output may contain full skill metadata, so the capture file must be user-private",
+  );
+  assert.match(
+    migrationRuntimeScript,
+    /stdio:\s*\['ignore', handle\.fd, 'pipe'\]/,
+    "the child stdout must be a regular-file descriptor with stderr kept on a pipe",
+  );
+  assert.match(
+    migrationRuntimeScript,
+    /await readFile\(stdoutFile, 'utf8'\)/,
+    "the complete discovery document must be read from the capture file after child exit",
+  );
+  assert.match(
+    migrationRuntimeScript,
+    /await rm\(directory, \{ recursive: true, force: true \}\)/,
+    "the private capture directory must be removed on every path",
+  );
+  assert.match(
+    migrationRuntimeScript,
+    /execFileAsync\(executable, args, \{ env, timeout: TIMEOUT_MS \}\)/,
+    "commands other than skill discovery keep the existing execFile transport",
+  );
+});
+
 test("migration runtime verification preserves the user global plugin directory", () => {
   assert.match(
     migrationRuntimeScript,
