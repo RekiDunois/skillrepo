@@ -30,3 +30,19 @@ test('skill-development-location documents the authoring source contract', async
   assert.doesNotMatch(text, /\/Users\/[^\s`]+/);
   assert.doesNotMatch(text, /(?:api[_-]?key|token|cookie|session[_-]?state)\s*:/i);
 });
+
+test('skill-development-location keeps legacy codex roots out of default discovery', async () => {
+  const text = await readFile(skillPath, 'utf8');
+
+  assert.match(text, /\.codex\/skills/);
+  assert.match(
+    text,
+    /(?:\.codex\/skills[^\n.]*not[^\n.]*default discovery|default discovery[^\n.]*not[^\n.]*\.codex\/skills)/i,
+    'the model-facing contract must say that legacy .codex/skills roots are diagnostics in authoring mode only, not default discovery sources',
+  );
+  assert.doesNotMatch(
+    text,
+    /Default locator mode[^.]*including[^.]*legacy `\.codex\/skills`/i,
+    'default discovery must not claim it can select legacy .codex/skills copies',
+  );
+});
