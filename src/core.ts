@@ -1,7 +1,7 @@
-import { access, chmod, lstat, mkdir, readFile, readdir, readlink, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { constants, existsSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
@@ -937,7 +937,56 @@ export async function unregisterRepo(repoInput: string): Promise<void> {
 
 let openCodeQueue: Promise<void> = Promise.resolve();
 
+// `opencode debug skill` exits 0 but only delivers the bytes that fit in a
+// stdout pipe buffer; the remainder of a large discovery document is never
+// flushed (upstream pipe backpressure defect). A regular-file stdout receives
+// the complete document, so this one machine-readable command is executed with
+// file-backed stdout. All other commands keep the pipe transport.
+function usesFileBackedStdout(args: readonly string[]): boolean {
+  return args.length === 2 && args[0] === 'debug' && args[1] === 'skill';
+}
+
+async function executeOpenCodeWithFileStdout(args: string[], env: NodeJS.ProcessEnv): Promise<VerifyResult> {
+  const command = `opencode ${args.join(' ')}`;
+  const directory = await mkdtemp(join(tmpdir(), 'skillrepo-opencode-discovery-'));
+  try {
+    const stdoutFile = join(directory, 'skill-discovery.json');
+    const handle = await open(stdoutFile, 'w', 0o600);
+    let stderr = '';
+    let exitCode: number | null = null;
+    let spawnError: Error | undefined;
+    try {
+      exitCode = await new Promise<number | null>((resolvePromise, reject) => {
+        const child = spawn('opencode', args, {
+          shell: false,
+          env,
+          stdio: ['ignore', handle.fd, 'pipe'],
+        });
+        child.stderr!.on('data', data => { stderr += data; });
+        child.on('error', reject);
+        child.on('close', code => resolvePromise(code));
+      });
+    } catch (error) {
+      spawnError = error instanceof Error ? error : new Error(String(error));
+    } finally {
+      await handle.close();
+    }
+    const stdout = await readFile(stdoutFile, 'utf8');
+    return {
+      ok: !spawnError && exitCode === 0,
+      command,
+      stdout,
+      stderr: spawnError ? `${stderr}${spawnError.message}` : stderr,
+    };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 async function executeOpenCode(args: string[], env: NodeJS.ProcessEnv): Promise<VerifyResult> {
+  if (usesFileBackedStdout(args)) {
+    return await executeOpenCodeWithFileStdout(args, env);
+  }
   return await new Promise(resolvePromise => {
     const child = spawn('opencode', args, {
       shell: false,
