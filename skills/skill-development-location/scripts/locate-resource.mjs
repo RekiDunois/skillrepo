@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 
 function usage(message) {
   if (message) console.error(`locate-resource: ${message}`);
-  console.error('Usage: node locate-resource.mjs --kind <skill|agent> --name <name> [--config <file>]');
+  console.error('Usage: node locate-resource.mjs --kind <skill|agent> --name <name> [--config <file>] [--project-root <path>] [--authoring]');
   process.exit(2);
 }
 
@@ -18,6 +18,10 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') usage();
+    if (argument === '--authoring') {
+      values.authoring = true;
+      continue;
+    }
     if (argument === '--kind' || argument === '--name' || argument === '--config' || argument === '--project-root') {
       const value = argv[++index];
       if (!value || value.startsWith('--')) usage(`${argument} requires a value`);
@@ -34,6 +38,7 @@ function parseArgs(argv) {
     name: values.name.trim(),
     config: values.config,
     projectRoot: values['project-root'],
+    authoring: Boolean(values.authoring),
   };
 }
 
@@ -151,7 +156,7 @@ function resolveConfiguredPath(source, projectRoot) {
   return resolve(isAbsolute(expanded) ? expanded : join(projectRoot, expanded));
 }
 
-function sourceDirectories(sources, projectRoot) {
+function sourceDirectories(sources, projectRoot, origin, role) {
   const directories = [];
   for (const configuredSource of sources) {
     const source = typeof configuredSource === 'string' ? configuredSource : configuredSource.path;
@@ -165,7 +170,15 @@ function sourceDirectories(sources, projectRoot) {
     }
     for (const match of matches) {
       try {
-        if (statSync(match).isDirectory()) directories.push({ configured: source, path: match, recursive });
+        if (statSync(match).isDirectory()) {
+          directories.push({
+            configured: source,
+            path: match,
+            recursive,
+            origin: configuredSource.origin ?? origin,
+            role: configuredSource.role ?? role,
+          });
+        }
       } catch {
         // Missing sources are reported in the JSON result and do not abort other roots.
       }
@@ -221,33 +234,52 @@ async function collectMarkdownFiles(root, recursive = true) {
 function standardSources(kind, configDir, projectRoots) {
   const projectSources = projectRoots.flatMap(projectRoot => kind === 'skill'
     ? [
-      join(projectRoot, '.opencode', 'skills'),
-      join(projectRoot, '.opencode', 'skill'),
-      join(projectRoot, '.claude', 'skills'),
-      join(projectRoot, '.agents', 'skills'),
+      { path: join(projectRoot, '.opencode', 'skills'), origin: 'opencode-native', role: 'authoring' },
+      { path: join(projectRoot, '.opencode', 'skill'), origin: 'opencode-native', role: 'authoring' },
+      { path: join(projectRoot, '.claude', 'skills'), origin: 'claude-skills', role: 'consumer' },
+      { path: join(projectRoot, '.agents', 'skills'), origin: 'agents-skills', role: 'consumer' },
     ]
     : [
-      { path: join(projectRoot, '.opencode', 'agents') },
-      { path: join(projectRoot, '.opencode', 'agent') },
-      { path: join(projectRoot, '.opencode', 'modes'), recursive: false },
-      { path: join(projectRoot, '.opencode', 'mode'), recursive: false },
+      { path: join(projectRoot, '.opencode', 'agents'), origin: 'opencode-native', role: 'authoring' },
+      { path: join(projectRoot, '.opencode', 'agent'), origin: 'opencode-native', role: 'authoring' },
+      { path: join(projectRoot, '.opencode', 'modes'), recursive: false, origin: 'opencode-native', role: 'authoring' },
+      { path: join(projectRoot, '.opencode', 'mode'), recursive: false, origin: 'opencode-native', role: 'authoring' },
     ]);
 
   if (kind === 'skill') {
     return [
       ...projectSources,
-      join(configDir, 'skills'),
-      join(configDir, 'skill'),
-      join(homedir(), '.claude', 'skills'),
-      join(homedir(), '.agents', 'skills'),
+      { path: join(configDir, 'skills'), origin: 'opencode-native', role: 'authoring' },
+      { path: join(configDir, 'skill'), origin: 'opencode-native', role: 'authoring' },
+      { path: join(homedir(), '.claude', 'skills'), origin: 'claude-skills', role: 'consumer' },
+      { path: join(homedir(), '.agents', 'skills'), origin: 'agents-skills', role: 'consumer' },
     ];
   }
   return [
     ...projectSources,
-    { path: join(configDir, 'agents') },
-    { path: join(configDir, 'agent') },
-    { path: join(configDir, 'modes'), recursive: false },
-    { path: join(configDir, 'mode'), recursive: false },
+    { path: join(configDir, 'agents'), origin: 'opencode-native', role: 'authoring' },
+    { path: join(configDir, 'agent'), origin: 'opencode-native', role: 'authoring' },
+    { path: join(configDir, 'modes'), recursive: false, origin: 'opencode-native', role: 'authoring' },
+    { path: join(configDir, 'mode'), recursive: false, origin: 'opencode-native', role: 'authoring' },
+  ];
+}
+
+function repositoryAuthoringSources(kind, projectRoot) {
+  const gitRoot = gitValue(projectRoot, ['rev-parse', '--show-toplevel']);
+  if (!gitRoot) return [];
+  const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
+  const repoRoot = resolve(gitRoot);
+  return [
+    { path: join(repoRoot, '.apm', sourceDirectory), origin: 'project-repository', role: 'authoring' },
+    { path: join(repoRoot, sourceDirectory), origin: 'project-repository', role: 'authoring' },
+  ];
+}
+
+function consumerDiagnosticSources(kind, projectRoots) {
+  if (kind !== 'skill') return [];
+  return [
+    ...projectRoots.map(projectRoot => ({ path: join(projectRoot, '.codex', 'skills'), origin: 'codex-legacy', role: 'consumer' })),
+    { path: join(homedir(), '.codex', 'skills'), origin: 'codex-legacy', role: 'consumer' },
   ];
 }
 
@@ -343,6 +375,36 @@ function realDirectory(path) {
   }
 }
 
+function provenanceRank(root) {
+  if (root.role !== 'authoring') return 0;
+  if (root.origin === 'configured') return 3;
+  if (root.origin === 'project-repository') return 2;
+  return 1;
+}
+
+function upsertCandidate(bucket, candidate, rank) {
+  const existing = bucket.get(candidate.path);
+  if (!existing || rank > existing.rank) bucket.set(candidate.path, { candidate, rank });
+}
+
+function classifyCandidate(candidate, authoringRoots, consumerRoots, discoveryRoot) {
+  const locations = [candidate.path, candidate.sourceRoot];
+  const authoringHit = authoringRoots
+    .slice()
+    .sort((first, second) => provenanceRank(second) - provenanceRank(first))
+    .find(root => {
+      const real = realDirectory(root.path) ?? resolve(root.path);
+      return locations.some(location => pathWithin(real, location));
+    });
+  if (authoringHit) return { role: 'authoring', origin: authoringHit.origin, rank: provenanceRank(authoringHit) };
+  const consumerHit = consumerRoots.find(root => {
+    const real = realDirectory(root.path) ?? resolve(root.path);
+    return locations.some(location => pathWithin(real, location));
+  });
+  if (consumerHit) return { role: 'consumer', origin: consumerHit.origin, rank: 0 };
+  return { role: 'authoring', origin: discoveryRoot.origin, rank: provenanceRank(discoveryRoot) };
+}
+
 function hasPackageManifest(repoRoot) {
   try {
     const manifestStat = lstatSync(join(repoRoot, 'apm.yml'));
@@ -403,7 +465,7 @@ function layoutMetadata(kind, sourceRoot, git) {
   };
 }
 
-async function locate({ kind, name, config: explicitConfig, projectRoot: explicitProjectRoot }) {
+async function locate({ kind, name, config: explicitConfig, projectRoot: explicitProjectRoot, authoring }) {
   const configFile = configPath(explicitConfig);
   const data = await readConfig(configFile);
   const configDir = resolve(expandHome(process.env.OPENCODE_CONFIG_DIR ?? '~/.config/opencode'));
@@ -412,13 +474,24 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
   const configured = kind === 'skill'
     ? configuredPaths(data.skills)
     : configuredPaths(data.agents);
-  const configuredRoots = sourceDirectories(configured, projectRoot);
-  const roots = [
-    ...sourceDirectories(standardSources(kind, configDir, projectRoots), projectRoot),
-    ...configuredRoots,
-  ];
-  const primaryCandidates = [];
-  const aliasCandidates = [];
+  const configuredRoots = sourceDirectories(configured, projectRoot, 'configured', 'authoring');
+  const standardRoots = sourceDirectories(standardSources(kind, configDir, projectRoots), projectRoot);
+  const repositoryRoots = authoring
+    ? sourceDirectories(repositoryAuthoringSources(kind, projectRoot), projectRoot)
+    : [];
+  const consumerDiagnosticRoots = authoring
+    ? sourceDirectories(consumerDiagnosticSources(kind, projectRoots), projectRoot)
+    : [];
+  const roots = [...standardRoots, ...configuredRoots, ...repositoryRoots, ...consumerDiagnosticRoots];
+  const authoringRoots = authoring
+    ? [...configuredRoots, ...repositoryRoots, ...standardRoots.filter(root => root.role === 'authoring')]
+    : [];
+  const consumerRoots = authoring
+    ? [...standardRoots.filter(root => root.role === 'consumer'), ...consumerDiagnosticRoots]
+    : [];
+  const primary = new Map();
+  const alias = new Map();
+  const consumers = new Map();
 
   for (const root of roots) {
     for (const file of await collectMarkdownFiles(root.path, root.recursive)) {
@@ -436,18 +509,61 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
         sourceRoot,
         configuredSource: root.configured,
         frontmatterName: metadataName,
-        git: gitState(file.path),
       };
+
+      if (authoring) {
+        const classification = classifyCandidate(candidate, authoringRoots, consumerRoots, root);
+        if (classification.role === 'consumer') {
+          const diagnostic = {
+            path: candidate.path,
+            id: candidate.id,
+            origin: classification.origin,
+            layout: 'unknown',
+            repoRoot: null,
+          };
+          if (!consumers.has(diagnostic.path)) consumers.set(diagnostic.path, diagnostic);
+          continue;
+        }
+        candidate.git = gitState(candidate.path);
+        const layout = layoutMetadata(kind, candidate.sourceRoot, candidate.git);
+        candidate.repoRoot = layout.repoRoot;
+        candidate.layout = layout.layout;
+        upsertCandidate(identifiers[0] === name ? primary : alias, candidate, classification.rank);
+        continue;
+      }
+
+      candidate.git = gitState(candidate.path);
       const layout = layoutMetadata(kind, candidate.sourceRoot, candidate.git);
       candidate.repoRoot = layout.repoRoot;
       candidate.layout = layout.layout;
-      if (identifiers[0] === name) primaryCandidates.push(candidate);
-      else aliasCandidates.push(candidate);
+      upsertCandidate(identifiers[0] === name ? primary : alias, candidate, provenanceRank(root));
     }
   }
 
-  const matches = primaryCandidates.length ? primaryCandidates : aliasCandidates;
-  const unique = [...new Map(matches.map(candidate => [candidate.path, candidate])).values()];
+  const pool = primary.size ? primary : alias;
+  const unique = [...pool.values()].map(entry => entry.candidate);
+  const consumerMatches = [...consumers.values()];
+
+  if (authoring) {
+    if (unique.length === 1) {
+      return { kind, name, config: configFile, ...unique[0], selectionMode: 'authoring', consumerMatches };
+    }
+    const reason = unique.length === 0
+      ? (consumerMatches.length ? 'authoritative source not found' : 'resource not found')
+      : 'resource is ambiguous';
+    const error = new Error(`${reason}: ${kind} '${name}'`);
+    error.result = {
+      kind,
+      name,
+      config: configFile,
+      selectionMode: 'authoring',
+      searchedRoots: roots.map(root => resolve(root.path)),
+      candidates: unique,
+      consumerMatches,
+    };
+    throw error;
+  }
+
   if (unique.length !== 1) {
     const reason = unique.length === 0 ? 'resource not found' : 'resource is ambiguous';
     const error = new Error(`${reason}: ${kind} '${name}'`);
