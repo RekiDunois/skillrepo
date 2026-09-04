@@ -1,5 +1,6 @@
 import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
+import { renderOpenApmManifest } from './openapm.js';
 
 const templateUrl = new URL('../../templates/opencode-migration.gitignore', import.meta.url);
 export type InitLayout = 'apm' | 'legacy';
@@ -29,8 +30,7 @@ export async function initRepo(inputPath: string, cwd = process.cwd(), layout: I
   await mkdir(resolve(sourceRoot, 'agents'), { recursive: true });
   await writeFile(resolve(target, '.gitignore'), template, { encoding: 'utf8', flag: 'wx' });
   if (layout === 'apm') {
-    const manifestName = JSON.stringify(basename(target));
-    await writeFile(resolve(target, 'apm.yml'), `name: ${manifestName}\nversion: 0.1.0\n`, { encoding: 'utf8', flag: 'wx' });
+    await writeFile(resolve(target, 'apm.yml'), renderOpenApmManifest(basename(target)), { encoding: 'utf8', flag: 'wx' });
   }
   await writeFile(resolve(sourceRoot, 'skills', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
   await writeFile(resolve(sourceRoot, 'agents', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });

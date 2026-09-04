@@ -16,14 +16,16 @@ default is the standard package authoring layout:
 skillrepo init /path/to/new-repo
 ```
 
-`init` creates only the package skeleton (`apm.yml` with `name` and
-`version: 0.1.0`, `.apm/skills/.gitkeep`,
+`init` creates only the package skeleton (`apm.yml` pinned to the normative
+OpenAPM v0.1 manifest contract with `$schema`, `name`, and
+`version: "0.1.0"` — the initial package version for new packages, not an
+OpenAPM spec version; plus `.apm/skills/.gitkeep`,
 `.apm/agents/.gitkeep`, and `.gitignore`). It does not initialize Git, modify
 OpenCode configuration, create symlinks, register the repository, or require
 OpenCode to discover an empty repository. Add the new skill or agent, then
 explicitly run `skillrepo register /path/to/new-repo` when it is ready. Use
 `skillrepo init --layout legacy /path/to/new-repo` only when legacy layout is
-explicitly requested.
+explicitly requested; that layout creates no `apm.yml`.
 
 When creating a new resource inside an existing repository, first confirm the
 repository root and inspect its authoring layout. Create its directory and

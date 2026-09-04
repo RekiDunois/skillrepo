@@ -54,10 +54,16 @@ the package layout by default:
 skillrepo init <repo>
 ```
 
-`skillrepo init` creates `apm.yml` with the current minimum `name` and
-`version: 0.1.0` fields, plus `.apm/skills`, by default. Use
+`skillrepo init` creates `apm.yml` pinned to the normative OpenAPM v0.1
+manifest contract, plus `.apm/skills`, by default. The manifest has exactly
+three fields: `$schema` selecting the vendored official v0.1 schema, `name`
+set to the repository directory basename as a YAML string, and `version`
+`0.1.0` as a string (the initial package version for new packages, not an
+OpenAPM spec version). Repository tests validate this output against the
+vendored schema offline; `skillrepo` does not invoke the APM CLI. Use
 `skillrepo init --layout legacy <repo>` only when the user explicitly requests
-the legacy layout. `init` does not initialize Git or register the repository.
+the legacy layout; that layout creates no `apm.yml`. `init` does not
+initialize Git or register the repository.
 
 ## Check Before Writing
 
