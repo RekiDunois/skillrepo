@@ -116,23 +116,36 @@ class BoundaryCollector {
   }
 }
 
+// Boundary resolution follows the caller-supplied audit environment so that
+// discovery, authoring-source resolution, and boundary analysis observe one
+// user environment (issue #40 synthetic-HOME isolation). A parameterless
+// homedir() is a last-resort fallback for an audit env that carries no home.
+function auditHomeDirectory(env: NodeJS.ProcessEnv): string {
+  const configured = process.platform === 'win32'
+    ? env.USERPROFILE || env.HOME
+    : env.HOME || env.USERPROFILE;
+  return configured || homedir();
+}
+
 function resolveAbsolutePathLiteral(literal: string): string {
   return resolve(literal);
 }
 
-function resolveTildePathLiteral(literal: string): string {
-  return literal === '~' ? homedir() : join(homedir(), literal.slice(2));
+function resolveTildePathLiteral(literal: string, env: NodeJS.ProcessEnv): string {
+  return literal === '~' ? auditHomeDirectory(env) : join(auditHomeDirectory(env), literal.slice(2));
 }
 
-function resolveEnvPathLiteral(literal: string, fromDir: string): { resolved: string } | { variable: string } {
+function resolveEnvPathLiteral(literal: string, env: NodeJS.ProcessEnv): { resolved: string } | { variable: string } {
   const match = literal.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(\/[A-Za-z0-9._@+-]+.*)$/);
   if (!match) return { variable: literal };
   const [, name, rest] = match;
-  if (name === 'HOME') return { resolved: join(homedir(), rest!) };
+  if (name === 'HOME') return { resolved: join(auditHomeDirectory(env), rest!) };
+  const value = env[name!];
+  if (typeof value === 'string' && value !== '') return { resolved: resolve(join(value, rest!)) };
   return { variable: name! };
 }
 
-async function analyzeTextFile(collector: BoundaryCollector, file: string, skillDir: string, repoRoot: string): Promise<void> {
+async function analyzeTextFile(collector: BoundaryCollector, file: string, skillDir: string, repoRoot: string, env: NodeJS.ProcessEnv): Promise<void> {
   const info = await lstat(file);
   if (!info.isFile()) return;
   if (info.size > MAX_SCAN_BYTES) return;
@@ -180,11 +193,11 @@ async function analyzeTextFile(collector: BoundaryCollector, file: string, skill
         continue;
       }
       if (kind === 'tilde') {
-        await recordResolvable(collector, file, lineNumber, literal, resolveTildePathLiteral(literal), skillDir, repoRoot);
+        await recordResolvable(collector, file, lineNumber, literal, resolveTildePathLiteral(literal, env), skillDir, repoRoot);
         continue;
       }
       if (kind === 'env') {
-        const outcome = resolveEnvPathLiteral(literal, dirname(file));
+        const outcome = resolveEnvPathLiteral(literal, env);
         if ('resolved' in outcome) {
           await recordResolvable(collector, file, lineNumber, literal, outcome.resolved, skillDir, repoRoot);
         } else {
@@ -295,7 +308,7 @@ async function analyzeSymlink(collector: BoundaryCollector, path: string, skillD
   }
 }
 
-async function analyzeDirectory(collector: BoundaryCollector, dir: string, skillDir: string, repoRoot: string): Promise<void> {
+async function analyzeDirectory(collector: BoundaryCollector, dir: string, skillDir: string, repoRoot: string, env: NodeJS.ProcessEnv): Promise<void> {
   for (const name of await realDirectoryEntries(dir)) {
     const path = join(dir, name);
     const entryStat = await lstat(path);
@@ -308,11 +321,11 @@ async function analyzeDirectory(collector: BoundaryCollector, dir: string, skill
         collector.addFinding({ code: 'local-runtime-environment', detail: LOCAL_RUNTIME_ENV_DETAIL, path });
         continue;
       }
-      await analyzeDirectory(collector, path, skillDir, repoRoot);
+      await analyzeDirectory(collector, path, skillDir, repoRoot, env);
       continue;
     }
     if (entryStat.isFile()) {
-      await analyzeTextFile(collector, path, skillDir, repoRoot);
+      await analyzeTextFile(collector, path, skillDir, repoRoot, env);
     }
   }
 }
@@ -323,11 +336,15 @@ async function analyzeDirectory(collector: BoundaryCollector, dir: string, skill
 export async function analyzeSkillBoundary(options: {
   skillDir: string;
   repoRoot: string;
+  // User environment used for `~`, `${HOME}`/`${USERPROFILE}`, and other
+  // `${VAR}` boundary expansion; defaults to the current process environment.
+  env?: NodeJS.ProcessEnv;
 }): Promise<BoundaryAnalysis> {
   const skillDir = resolve(options.skillDir);
   const repoRoot = resolve(options.repoRoot);
+  const env = options.env ?? process.env;
   const collector = new BoundaryCollector();
-  await analyzeDirectory(collector, skillDir, skillDir, repoRoot);
+  await analyzeDirectory(collector, skillDir, skillDir, repoRoot, env);
 
   collector.evidence.sort((left, right) =>
     left.fromFile.localeCompare(right.fromFile)

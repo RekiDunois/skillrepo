@@ -456,6 +456,7 @@ async function auditSkill(
       const boundary = await analyzeSkillBoundary({
         skillDir: dirname(authoritativeSource),
         repoRoot: context.repoRoot,
+        env,
       });
       findings.push(...boundary.findings);
       if (boundary.sharedResources.length) skillResources.set(discovered.id, boundary.sharedResources);
