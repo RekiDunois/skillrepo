@@ -1,7 +1,7 @@
 import { lstat, readdir, readFile, readlink, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { detectTextAuditFindings } from './audit.js';
+import { containsSensitiveCredentialText, detectTextAuditFindings } from './audit.js';
 
 // Focused package-boundary evidence analysis for one authoritative skill
 // directory (issue #40). The module only reports relationships supported by
@@ -50,6 +50,23 @@ const HOME_DETAIL = 'contains an absolute user-home path; review for privacy and
 const ABSOLUTE_SYMLINK_DETAIL = 'absolute symlink is machine-specific and may expose a local path';
 const EXTERNAL_SYMLINK_DETAIL = 'relative symlink resolves outside the repository';
 const LOCAL_RUNTIME_ENV_DETAIL = 'local virtual environment should not be committed; ensure dependencies are reproducible without it';
+
+// Findings are user-visible while evidence stays internal, so a literal that
+// matches credential-shaped or placeholder-shaped content is never echoed into
+// detail or relatedPath text. Evidence and shared-resource grouping keep the
+// original value; classification codes are unaffected.
+const REDACTED_LITERAL_DETAIL = 'path reference text is withheld because it matches credential-shaped or placeholder-shaped content';
+
+// '${HOME}/bin' and '${VAR}/tool' carry a structural variable prefix that is
+// an identifier, not secret content; credential detection examines the path
+// segments behind it.
+function sensitiveCheckText(literal: string): string {
+  return literal.replace(/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?/, '');
+}
+
+function redactIfSensitive(text: string): string | null {
+  return containsSensitiveCredentialText(text) ? REDACTED_LITERAL_DETAIL : null;
+}
 
 const LOCAL_RUNTIME_ENV_DIRS = new Set(['.venv', 'venv']);
 
@@ -171,9 +188,12 @@ async function analyzeTextFile(collector: BoundaryCollector, file: string, skill
         if ('resolved' in outcome) {
           await recordResolvable(collector, file, lineNumber, literal, outcome.resolved, skillDir, repoRoot);
         } else {
+          const redacted = redactIfSensitive(sensitiveCheckText(literal));
           collector.addFinding({
             code: 'package-boundary-unknown',
-            detail: `path reference '${literal}' depends on the '${outcome.variable}' environment variable; the package boundary cannot be established without guessing`,
+            detail: redacted
+              ? `${redacted}; the package boundary cannot be established without guessing`
+              : `path reference '${literal}' depends on the '${outcome.variable}' environment variable; the package boundary cannot be established without guessing`,
             path: file,
           });
         }
@@ -198,20 +218,24 @@ async function recordResolvable(
   collector.addEvidence({ fromFile, line, literal, resolvedPath: resolved, relation });
   if (relation === 'inside-skill') return;
   if (relation === 'inside-repo') {
+    const canonical = await canonicalResourceKey(resolved);
     collector.addFinding({
       code: 'shared-resource-boundary',
       detail: 'references a shared repository resource outside the individual skill directory; the current repository grouping must be preserved',
       path: fromFile,
-      relatedPath: await canonicalResourceKey(resolved),
+      ...(!redactIfSensitive(canonical) ? { relatedPath: canonical } : {}),
     });
     await collector.addSharedResource(resolved);
     return;
   }
+  const redacted = redactIfSensitive(sensitiveCheckText(literal)) ?? redactIfSensitive(resolved);
   collector.addFinding({
     code: 'external-runtime-path',
-    detail: `path reference '${literal}' resolves outside the repository boundary`,
+    detail: redacted
+      ? `${redacted}; it resolves outside the repository boundary`
+      : `path reference '${literal}' resolves outside the repository boundary`,
     path: fromFile,
-    relatedPath: resolve(resolved),
+    ...(!redacted ? { relatedPath: resolve(resolved) } : {}),
   });
 }
 
@@ -260,11 +284,12 @@ async function analyzeSymlink(collector: BoundaryCollector, path: string, skillD
   }
 
   if (relation === 'inside-repo') {
+    const canonical = await canonicalResourceKey(resolved);
     collector.addFinding({
       code: 'shared-resource-boundary',
       detail: 'symlink target is a shared repository resource outside the individual skill directory; the current repository grouping must be preserved',
       path,
-      relatedPath: await canonicalResourceKey(resolved),
+      ...(!redactIfSensitive(canonical) ? { relatedPath: canonical } : {}),
     });
     await collector.addSharedResource(resolved);
   }

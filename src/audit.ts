@@ -191,6 +191,18 @@ export function detectTextAuditFindings(path: string, text: string): TextAuditFi
   return findings;
 }
 
+// Fail-safe predicate for consumers that build user-visible findings from
+// source-derived text such as path literals: true when the text matches a
+// high-confidence secret pattern or is placeholder-shaped, so the text must
+// not be echoed back into finding output.
+export function containsSensitiveCredentialText(text: string): boolean {
+  for (const detector of HIGH_CONFIDENCE_SECRETS) {
+    detector.pattern.lastIndex = 0;
+    if (detector.pattern.test(text)) return true;
+  }
+  return looksPlaceholder(text);
+}
+
 function scanTextContent(audit: MutableRepoAudit, relPath: string, text: string): void {
   for (const finding of detectTextAuditFindings(relPath, text)) {
     addFinding(audit, { severity: finding.severity, code: finding.code, path: relPath, detail: finding.detail });
