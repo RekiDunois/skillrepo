@@ -17,6 +17,7 @@ import {
 import { renderMigrationAudit } from './audit.js';
 import { applyMigrationIgnores, renderMigrationIgnore } from './ignore.js';
 import { applyMigration } from './migration.js';
+import { auditApmReadiness, renderApmAudit } from './apm_audit.js';
 import { classifyMigrationPortability, renderMigrationPortability } from './portability.js';
 import { applyMigrationPortabilityFixes, renderMigrationPortabilityFix } from './portability_fix.js';
 import { auditMigrationCommitReadiness } from './readiness.js';
@@ -25,7 +26,8 @@ import { renderSkillModificationHandoff } from './skill_modification_template.js
 import { initRepo } from './init.js';
 
 function usage(): never {
-  console.error(`Usage:\n  skillrepo init <dir> [--layout <apm|legacy>]\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify] [--template-out <file>]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]`);
+  console.error(`Usage:\n  skillrepo init <dir> [--layout <apm|legacy>]\n  skillrepo register <repo> [--no-verify]\n  skillrepo unregister <repo> [--no-verify]\n  skillrepo exec <repo-id> <repo-relative-resource> [args...]\n  skillrepo doctor\n  skillrepo migration apply --target-root <dir> [--plan <file>] [--execute] [--resume] [--no-verify] [--template-out <file>]\n  skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]\n  skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]\n  skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]
+  skillrepo apm audit [--project-root <path>] [--json]`);
   process.exit(2);
 }
 
@@ -320,6 +322,28 @@ async function main(): Promise<void> {
       }
       console.log(`Skill modification handoff written: ${outputPath}`);
     }
+    return;
+  }
+
+  if (command === 'apm') {
+    const [subcommand, ...apmArgs] = rest;
+    if (subcommand !== 'audit') usage();
+
+    const { values, positionals } = parseArgs({
+      args: apmArgs,
+      allowPositionals: true,
+      allowNegative: true,
+      options: {
+        'project-root': { type: 'string' },
+        json: { type: 'boolean', default: false },
+      },
+    });
+    if (positionals.length) usage();
+
+    // DIRECT / NEEDS_CHANGES / BLOCKED are successful audit results; the
+    // command exits non-zero only when the audit itself cannot be performed.
+    const result = await auditApmReadiness({ projectRoot: values['project-root'] });
+    console.log(values.json ? JSON.stringify(result, null, 2) : renderApmAudit(result));
     return;
   }
 
