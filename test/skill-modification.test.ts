@@ -23,6 +23,13 @@ test('skill-modification has an OpenCode-compatible frontmatter contract', async
   assert.match(text, /source identity/);
   assert.match(text, /ambiguous|歧义/i);
   assert.match(text, /compatibility|兼容壳|symlink/i);
+  assert.match(text, /--authoring/);
+  assert.match(text, /authoritative source not found/);
+  assert.match(text, /consumerMatches/);
+  assert.match(text, /must not be edited directly/);
+  assert.match(text, /directory order, timestamp, or Git-state heuristics/);
+  assert.match(text, /apm install/);
+  assert.match(text, /Do not infer or invent `--global`, `--target`/);
   assert.doesNotMatch(text, /\/Users\/[^\s`]+/);
   assert.doesNotMatch(text, /(?:api[_-]?key|token|cookie|session[_-]?state)\s*:/i);
 });

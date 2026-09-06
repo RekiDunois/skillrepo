@@ -102,19 +102,29 @@ Registration must point OpenCode at the selected source root and must not copy
 the new skill. If registration reports an ambiguous layout or a duplicate
 skill ID, stop and resolve that error rather than choosing a source.
 
-Run the locator with the exact new ID and verify all of these fields:
+Run the locator in authoring mode with the exact new ID and verify all of
+these fields:
 
 ```bash
 node <skill-development-location>/scripts/locate-resource.mjs \
   --kind skill \
   --name <SKILL_ID> \
-  --project-root "$(pwd)"
+  --project-root "$(pwd)" \
+  --authoring
 ```
 
-The result must identify exactly one real `SKILL.md`, the expected `repoRoot`,
-the selected `layout`, the selected `sourceRoot`, the expected
-`sourceRelativePath`, and managed Git state. Re-run the locator after any edit;
-missing or ambiguous results are failures.
+The result must carry `selectionMode: "authoring"` and identify exactly one
+real `SKILL.md`, the expected `repoRoot`, the selected `layout`, the selected
+`sourceRoot`, the expected `sourceRelativePath`, and managed Git state.
+Re-run the authoring locator after any edit; `authoritative source not found`,
+missing, or ambiguous results are failures. `consumerMatches` entries are
+runtime/deployment copies and must not be edited directly.
+
+If the repository is already deployed to another agent through a known
+deployment, rerun that established deployment after the new skill is created
+and verify the consumer with the deployment runtime's supported verification
+(for APM, rerun `apm install` with the known existing scope and target). Do
+not attempt to discover or overwrite unknown consumer trees automatically.
 
 For runtime files, calculate paths from the returned repository root and use:
 
