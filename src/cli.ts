@@ -45,6 +45,13 @@ function printVerification(results: VerifyResult[]): boolean {
   return ok;
 }
 
+function printLayoutStrategies(result: { repositories: string[]; layoutStrategies: Record<string, string> }): void {
+  for (const repoId of result.repositories) {
+    const strategy = result.layoutStrategies[repoId];
+    if (strategy) console.log(`  strategy ${repoId}: ${strategy}`);
+  }
+}
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
   if (!command) usage();
@@ -271,6 +278,7 @@ async function main(): Promise<void> {
         const resumed = result.resumedMoves.some(item => item.target === move.target);
         console.log(`  ${resumed ? 'already-moved' : move.kind}: ${move.source} -> ${move.target}`);
       }
+      printLayoutStrategies(result);
       console.log('No files were moved. Re-run with --execute only after reviewing this output.');
       return;
     }
@@ -285,6 +293,7 @@ async function main(): Promise<void> {
     }
     if (result.transactionId) console.log(`Transaction: ${result.transactionId} (${result.status ?? 'unknown'}, phase ${result.phase ?? 'unknown'})`);
     if (result.journalPath) console.log(`Transaction journal: ${result.journalPath}`);
+    printLayoutStrategies(result);
     console.log(`Compatibility paths: ${result.compatibilityPaths.length}`);
     if (result.verification.length && !printVerification(result.verification)) {
       throw new Error('OpenCode verification failed after migration. Run skillrepo doctor for details.');

@@ -153,6 +153,41 @@ This command is intended for portable runtime frontmatter that must launch a
 file inside a repo without hard-coding the repo's installation directory or the
 user's home directory.
 
+## APM package layouts and Agent Skills compatibility
+
+Every APM package produced by `skillrepo init` or `migration apply` resolves to exactly one layout strategy, selected by the package's primitive composition:
+
+| Package composition | Authoritative skill source | Other APM primitives | Root `skills/` compatibility view |
+| --- | --- | --- | --- |
+| skills only | `skills/` | none | same authoritative tree; no duplicate |
+| skills + agents (or other APM-only primitives) | `.apm/skills/` | `.apm/...` | generated managed projection |
+| agents only | none | `.apm/agents/` | none |
+
+The default `skillrepo init <dir>` skeleton is composition-neutral: it creates
+only `apm.yml` and `.gitignore` and waits for real content before choosing a
+layout. Skill-only packages keep one root `skills/` tree. Mixed packages keep
+`.apm/skills/` as the single editable source and publish a generated root
+`skills/` projection so Agent Skills consumers can discover
+`skills/<skill-name>/SKILL.md`. The projection is verified with a content
+fingerprint recorded in `skills/.skillrepo-projection.json`; editing either
+tree out of sync fails closed instead of being silently repaired. Existing
+repositories without `apm.yml` keep working as legacy skillrepo checkouts, and
+historical `.apm` packages without a projection remain inspectable and
+registerable.
+
+The two consumer surfaces keep different semantics:
+
+```text
+APM install
+  -> full APM package semantics
+  -> APM dependency graph
+  -> agents / other APM primitives
+
+npx skills add owner/repo
+  -> root Agent Skill content only
+  -> does not install or emulate the APM dependency graph
+```
+
 ## Thin migration apply
 
 ## Transactional migration apply
