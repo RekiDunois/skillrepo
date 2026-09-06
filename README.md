@@ -57,6 +57,7 @@ skillrepo migration audit --target-root <dir> [--plan <file>] [--git <path>] [--
 skillrepo migration ignore --target-root <dir> [--plan <file>] [--git <path>] [--execute]
 skillrepo migration portability --target-root <dir> [--plan <file>] [--git <path>] [--json]
 skillrepo migration portability fix --target-root <dir> [--plan <file>] [--git <path>] [--execute] [--json]
+skillrepo apm audit [--project-root <path>] [--json]
 ```
 
 `init` creates a new package-layout skill repository by default, without
@@ -195,6 +196,77 @@ Unless `--no-verify` is used, fresh OpenCode processes check the complete expect
 After a skill directory moves, its old directory is recreated **without `SKILL.md`** and its remaining top-level runtime resources are symlinked to the new location. This keeps existing absolute paths such as `.../skill/foo/scripts/...` and `.../skill/foo/.venv/...` working without making OpenCode discover the same skill twice. Shared `lib/` paths and non-Markdown agent runtime resources get compatibility symlinks. Markdown agent files do not get old-path symlinks because that would create duplicate agent discovery; missing agent frontmatter `name` is filled mechanically from the filename before registration.
 
 Finally, each new repo is registered through the normal `registerRepo` path. Unless `--no-verify` is used, a migration with skills first moves and registers one skill as a canary, then starts a fresh full OpenCode runtime with the user's environment and checks TUI `/skill` state plus a deterministic real `skill()` call. The remaining moves are committed only after that gate passes. A final full-inventory/runtime check runs before commit; either runtime failure writes a redacted diagnostic beside the journal and rolls back the transaction. The verifier injects its mock provider through a temporary config and never writes test credentials to the user's config. `--no-verify` explicitly skips runtime compatibility verification.
+
+## APM readiness audit
+
+```bash
+skillrepo apm audit
+skillrepo apm audit --json
+skillrepo apm audit --project-root /path/to/project
+```
+
+The audit is strictly read-only. It inventories the skills actually visible to
+the current OpenCode environment, resolves one trustworthy **authoritative
+authoring source** for each skill through the same authoring-source locator the
+editing workflows use, and classifies APM migration readiness. It never
+migrates, rewrites, registers, installs, or otherwise mutates source files,
+OpenCode configuration, `.gitignore`, `apm.yml`, registration state, migration
+journals, or Git metadata.
+
+A deployment/consumer copy (for example `~/.agents/skills/<id>`) is never
+treated as an authoritative source merely because it is the only visible copy;
+consumer matches are reported diagnostically alongside the resolved source.
+Source resolution distinguishes authoritative authoring sources,
+consumer/deployment matches, source-not-found, and source-ambiguous outcomes;
+the audit consumes those outcomes instead of applying its own
+source-authority heuristics.
+
+Each skill receives exactly one classification:
+
+- `DIRECT` — skillrepo currently knows of no source-content or
+  package-boundary change required before APM packaging. **`DIRECT` is not a
+  deployment/runtime compatibility guarantee.** Final compatibility remains the
+  responsibility of the existing migration and runtime-verification path,
+  including migration apply, OpenCode discovery, canary/runtime verification,
+  and rollback behavior.
+- `NEEDS_CHANGES` — concrete source/package-boundary problems must be fixed
+  first, such as absolute home paths, shared in-repository resources outside
+  the individual skill directory, external runtime paths, or absolute/external
+  symlinks.
+- `BLOCKED` — the skill cannot be classified safely yet: no authoritative
+  source, ambiguous sources, invalid frontmatter, identity mismatch or
+  collision, ambiguous repository layout, unsupported source layout, or a
+  package boundary that cannot be established without guessing.
+
+The boundary analysis only uses concrete filesystem/source/config path
+evidence (symlink targets, absolute/`~`/relative path literals, resolvable
+environment-variable paths) and never infers dependencies from Markdown prose.
+Findings from unrelated repository files do not contaminate unrelated skills.
+`--json` emits deterministic `schemaVersion: 1` output; downstream consumers
+must use finding codes and structured fields, not English prose.
+
+All classifications, including `BLOCKED` and `NEEDS_CHANGES`, are successful
+audit results and exit `0`. The command exits non-zero only when the audit
+itself cannot be performed, for example when OpenCode execution fails or
+discovery output is unusable.
+
+The recommended workflow keeps the audit strictly advisory:
+
+```text
+existing OpenCode environment
+        ↓
+skillrepo apm audit
+        ↓
+DIRECT / NEEDS_CHANGES / BLOCKED
+        ↓
+user reviews/fixes findings
+        ↓
+separate migration plan
+        ↓
+existing transactional migration apply
+        ↓
+canary + real OpenCode runtime verification
+```
 
 ## Commit-readiness workflow
 
