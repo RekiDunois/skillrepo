@@ -284,3 +284,87 @@ test('resolves a symlinked package source to one real source identity', async ()
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('root skills under an apm.yml repository are APM authoring sources', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-apm-root-'));
+  const configDir = join(root, 'opencode');
+  const repo = join(root, 'package-repo');
+  try {
+    await mkdir(join(repo, 'skills', 'root-packaged'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await execFileAsync('git', ['init', '-q', repo]);
+    await writeFile(join(repo, 'skills', 'root-packaged', 'SKILL.md'), '---\nname: root-packaged\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\nversion: 0.1.0\n', 'utf8');
+
+    const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+    const found = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'root-packaged', '--project-root', repo, '--authoring'], env)).stdout);
+    assert.equal(found.path, await realpath(join(repo, 'skills', 'root-packaged', 'SKILL.md')));
+    assert.equal(found.layout, 'apm');
+    assert.equal(found.repoRoot, await realpath(repo));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a managed projection root is not a second authoring candidate', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-projection-'));
+  const configDir = join(root, 'opencode');
+  const repo = join(root, 'package-repo');
+  try {
+    await mkdir(join(repo, '.apm', 'skills', 'projected-skill'), { recursive: true });
+    await mkdir(join(repo, '.apm', 'agents'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await execFileAsync('git', ['init', '-q', repo]);
+    await writeFile(join(repo, '.apm', 'skills', 'projected-skill', 'SKILL.md'), '---\nname: projected-skill\ndescription: test\n---\n', 'utf8');
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\nversion: 0.1.0\n', 'utf8');
+
+    const { stageProjection } = await import('../src/layout.js');
+    await stageProjection(join(repo, '.apm', 'skills'), join(repo, 'skills'));
+    await writeFile(
+      join(configDir, 'opencode.jsonc'),
+      JSON.stringify({ skills: { paths: [join(repo, 'skills')] } }),
+      'utf8',
+    );
+
+    const env = { ...process.env, OPENCODE_CONFIG_DIR: configDir };
+    const found = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'projected-skill', '--project-root', repo, '--authoring'], env)).stdout);
+    assert.equal(found.path, await realpath(join(repo, '.apm', 'skills', 'projected-skill', 'SKILL.md')));
+    assert.equal(found.sourceRoot, await realpath(join(repo, '.apm', 'skills')));
+    assert.equal(found.layout, 'apm');
+
+    const consumerView = JSON.parse((await runLocator(['--kind', 'skill', '--name', 'projected-skill', '--project-root', repo], env)).stdout);
+    // Consumers still see the published projection path.
+    assert.equal(consumerView.path, await realpath(join(repo, 'skills', 'projected-skill', 'SKILL.md')));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an unrecognized projection marker keeps root skills ambiguous', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-location-forged-'));
+  const configDir = join(root, 'opencode');
+  const repo = join(root, 'mixed-repo');
+  try {
+    await mkdir(join(repo, '.apm', 'skills', 'forged-skill'), { recursive: true });
+    await mkdir(join(repo, 'skills', 'forged-skill'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await execFileAsync('git', ['init', '-q', repo]);
+    const skill = '---\nname: forged-skill\ndescription: test\n---\n';
+    await writeFile(join(repo, '.apm', 'skills', 'forged-skill', 'SKILL.md'), skill, 'utf8');
+    await writeFile(join(repo, 'skills', 'forged-skill', 'SKILL.md'), skill, 'utf8');
+    await writeFile(join(repo, 'apm.yml'), 'name: mixed-repo\nversion: 0.1.0\n', 'utf8');
+    await writeFile(join(repo, 'skills', '.skillrepo-projection.json'), '{ "schemaVersion": 1 }\n', 'utf8');
+    await writeFile(
+      join(configDir, 'opencode.jsonc'),
+      JSON.stringify({ skills: { paths: [join(repo, 'skills')] } }),
+      'utf8',
+    );
+
+    await assert.rejects(
+      () => runLocator(['--kind', 'skill', '--name', 'forged-skill', '--project-root', repo, '--authoring'], { ...process.env, OPENCODE_CONFIG_DIR: configDir }),
+      error => locatorFailure(error) && error.stderr.includes('resource is ambiguous'),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

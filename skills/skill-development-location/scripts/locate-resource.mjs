@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { globSync, lstatSync, realpathSync, statSync } from 'node:fs';
+import { globSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -414,6 +414,61 @@ function hasPackageManifest(repoRoot) {
   }
 }
 
+// Classification hint for a root skills directory that claims to be a managed
+// Agent Skills projection of an APM package. The marker is never treated as a
+// validity oracle: only its well-formedness is checked here, and fail-closed
+// fingerprint validation stays in `inspectRepo()`. "unrecognized" means a
+// marker exists but cannot be trusted, so the root tree must stay an
+// authoring candidate and produce a fail-closed ambiguity.
+const PROJECTION_HINT_ABSENT = 'absent';
+const PROJECTION_HINT_MANAGED = 'managed';
+const PROJECTION_HINT_UNRECOGNIZED = 'unrecognized';
+
+function projectionMarkerHintSync(sourceRoot) {
+  const markerPath = join(sourceRoot, '.skillrepo-projection.json');
+  let markerStat;
+  try {
+    markerStat = lstatSync(markerPath);
+  } catch {
+    return PROJECTION_HINT_ABSENT;
+  }
+  if (!markerStat.isFile() || markerStat.isSymbolicLink()) return PROJECTION_HINT_UNRECOGNIZED;
+  let marker;
+  try {
+    marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+  } catch {
+    return PROJECTION_HINT_UNRECOGNIZED;
+  }
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return PROJECTION_HINT_UNRECOGNIZED;
+  const wellFormed =
+    marker.schemaVersion === 1
+    && marker.owner === 'skillrepo'
+    && marker.kind === 'agent-skills-projection'
+    && marker.source === '.apm/skills'
+    && marker.target === 'skills'
+    && marker.fingerprintAlgorithm === 'sha256-tree-v1'
+    && typeof marker.fingerprint === 'string'
+    && /^[0-9a-f]{64}$/.test(marker.fingerprint);
+  return wellFormed ? PROJECTION_HINT_MANAGED : PROJECTION_HINT_UNRECOGNIZED;
+}
+
+// True when the given skill source root is the projected compatibility view of
+// a mixed APM package: the repo has apm.yml, the canonical .apm/skills source
+// exists, and the root tree carries a well-formed managed-projection marker.
+function isManagedProjectionRoot(sourceRoot, kind) {
+  if (kind !== 'skill') return false;
+  if (basename(sourceRoot) !== 'skills') return false;
+  const repoRoot = dirname(sourceRoot);
+  if (!hasPackageManifest(repoRoot)) return false;
+  const canonicalRoot = join(repoRoot, '.apm', 'skills');
+  try {
+    if (!statSync(canonicalRoot).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  return projectionMarkerHintSync(sourceRoot) === PROJECTION_HINT_MANAGED;
+}
+
 function canonicalSourceRoot(kind, configuredSourceRoot, filePath) {
   const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
   const gitRoot = gitValue(dirname(filePath), ['rev-parse', '--show-toplevel']);
@@ -436,27 +491,31 @@ function canonicalSourceRoot(kind, configuredSourceRoot, filePath) {
 function layoutMetadata(kind, sourceRoot, git) {
   const realSourceRoot = resolve(sourceRoot);
   const parent = dirname(realSourceRoot);
-  const packageRoot = dirname(parent);
-  const manifest = join(packageRoot, 'apm.yml');
-  let hasPackageManifest = false;
+  // The manifest lives next to the source directory's package: for `.apm/skills`
+  // that is the parent of `.apm`, and for a root `skills` tree it is the
+  // directory containing the tree itself.
+  const manifestDir = basename(parent) === '.apm' ? dirname(parent) : parent;
+  let hasManifest = false;
   try {
-    const manifestStat = lstatSync(manifest);
-    hasPackageManifest = manifestStat.isFile() && !manifestStat.isSymbolicLink();
+    const manifestStat = lstatSync(join(manifestDir, 'apm.yml'));
+    hasManifest = manifestStat.isFile() && !manifestStat.isSymbolicLink();
   } catch {
     // A source root can be a regular OpenCode directory without a package manifest.
   }
 
   const sourceDirectory = kind === 'skill' ? 'skills' : 'agents';
-  if (basename(realSourceRoot) === sourceDirectory && basename(parent) === '.apm' && hasPackageManifest) {
+  if (basename(realSourceRoot) === sourceDirectory && basename(parent) === '.apm' && hasManifest) {
     return {
-      repoRoot: git.gitRoot ?? packageRoot,
+      repoRoot: git.gitRoot ?? manifestDir,
       layout: 'apm',
     };
   }
   if (basename(realSourceRoot) === sourceDirectory) {
+    // A root source tree inside a repository with an apm.yml manifest is APM
+    // authoring space (issue #42), not a legacy skillrepo checkout.
     return {
       repoRoot: git.gitRoot ?? parent,
-      layout: 'skillrepo',
+      layout: hasManifest ? 'apm' : 'skillrepo',
     };
   }
   return {
@@ -500,6 +559,21 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
       if (!identifiers.includes(name)) continue;
       const configuredSourceRoot = await realpath(root.path);
       const sourceRoot = canonicalSourceRoot(kind, configuredSourceRoot, file.path);
+      // A well-formed managed projection marker marks the root tree as
+      // generated output of a mixed APM package; it must never become a
+      // second authoring candidate. Unrecognized markers keep the fail-closed
+      // ambiguity, and authoritative validation stays in inspectRepo().
+      if (authoring && isManagedProjectionRoot(sourceRoot, kind)) {
+        const diagnostic = {
+          path: file.path,
+          id: identifiers[0],
+          origin: 'skillrepo-projection',
+          layout: 'apm',
+          repoRoot: dirname(sourceRoot),
+        };
+        if (!consumers.has(diagnostic.path)) consumers.set(diagnostic.path, diagnostic);
+        continue;
+      }
       const sourceRelativePath = relative(sourceRoot, file.path).split(sep).join('/');
       const candidate = {
         path: file.path,

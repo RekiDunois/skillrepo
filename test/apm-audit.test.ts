@@ -665,3 +665,84 @@ test('the audit does not mutate the source tree, OpenCode config, or Git state',
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+test('a root-skills APM package is already packaged and DIRECT', async () => {
+  const f = await createFixture('root-skills-apm');
+  try {
+    const repo = join(f.root, 'package-repo');
+    await gitInit(repo);
+    const source = join(repo, 'skills', 'audit-root-apm', 'SKILL.md');
+    await writeSkill(source, 'audit-root-apm');
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\nversion: 0.1.0\n', 'utf8');
+    await registerSkillSource(f, join(repo, 'skills'));
+
+    const result = await runAudit(f);
+    assert.equal(result.summary.skills, 1);
+    const skill = result.skills[0];
+    assert.equal(skill.classification, 'DIRECT');
+    assert.equal(skill.layout, 'apm');
+    assert.equal(skill.alreadyPackaged, true);
+    assert.equal(skill.authoritativeSource, await realpath(source));
+    assert.equal(skill.repoRoot, await realpath(repo));
+    assert.equal(skill.sourceRoot, await realpath(join(repo, 'skills')));
+    assert.deepEqual(skill.findings, []);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('a valid managed projection is not a second authoring source', async () => {
+  const f = await createFixture('managed-projection');
+  try {
+    const repo = join(f.root, 'package-repo');
+    await gitInit(repo);
+    const canonical = join(repo, '.apm', 'skills', 'audit-projection');
+    await writeSkill(join(canonical, 'SKILL.md'), 'audit-projection');
+    await mkdir(join(repo, '.apm', 'agents'), { recursive: true });
+    await writeFile(join(repo, '.apm', 'agents', 'worker.agent.md'), '---\ndescription: worker\nmode: subagent\n---\n', 'utf8');
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\nversion: 0.1.0\n', 'utf8');
+
+    const { stageProjection } = await import('../src/layout.js');
+    await stageProjection(join(repo, '.apm', 'skills'), join(repo, 'skills'));
+    // Agent Skills consumers see the root projection; register it as the
+    // discovery source like a real mixed package would. The audit's project
+    // root is the package repository itself, as it would be for an operator
+    // working inside the mixed package.
+    await registerSkillSource(f, join(repo, 'skills'));
+
+    const result = await apmAudit.auditApmReadiness({ projectRoot: repo, env: f.env });
+    assert.equal(result.summary.skills, 1);
+    const skill = result.skills[0];
+    assert.equal(skill.skillId, 'audit-projection');
+    assert.equal(skill.classification, 'DIRECT');
+    assert.equal(skill.layout, 'apm');
+    assert.equal(skill.alreadyPackaged, true);
+    assert.equal(skill.authoritativeSource, await realpath(join(canonical, 'SKILL.md')));
+    assert.equal(skill.sourceRoot, await realpath(join(repo, '.apm', 'skills')));
+    assert.equal(skill.repoRoot, await realpath(repo));
+    assert.deepEqual(skill.findings, []);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('an unrecognized projection marker keeps dual authoring blocked', async () => {
+  const f = await createFixture('forged-projection');
+  try {
+    const repo = join(f.root, 'mixed-repo');
+    await gitInit(repo);
+    await writeSkill(join(repo, '.apm', 'skills', 'audit-forged', 'SKILL.md'), 'audit-forged');
+    await writeSkill(join(repo, 'skills', 'audit-forged', 'SKILL.md'), 'audit-forged');
+    await writeFile(join(repo, 'apm.yml'), 'name: mixed-repo\nversion: 0.1.0\n', 'utf8');
+    await writeFile(join(repo, 'skills', '.skillrepo-projection.json'), '{ "schemaVersion": 1 }\n', 'utf8');
+    await registerSkillSource(f, join(repo, 'skills'));
+
+    const result = await apmAudit.auditApmReadiness({ projectRoot: repo, env: f.env });
+    assert.equal(result.summary.skills, 1);
+    const skill = result.skills[0];
+    assert.equal(skill.classification, 'BLOCKED');
+    assert.deepEqual(findingCodes(skill), ['authoritative-source-ambiguous']);
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});

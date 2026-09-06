@@ -260,7 +260,11 @@ async function resolveRepoContext(outcome: Extract<LocatorOutcome, { status: 're
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const duplicate = message.match(/Duplicate skill ID '([^']+)'/);
-    if (/multiple supported layouts|requires a regular apm\.yml/.test(message)) {
+    // Dual skill sources (with or without a broken/unmanaged projection marker),
+    // split packages, and .apm trees without a manifest are all ambiguous
+    // repository layouts; a valid managed projection passes inspection and is
+    // never classified ambiguous.
+    if (/multiple supported layouts|requires a regular apm\.yml|invalid split package|invalid managed skill projection/i.test(message)) {
       return {
         status: 'blocked',
         finding: {
