@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
-import { parseFrontmatter } from './frontmatter.js';
+import { parseFrontmatter, stableSkillId } from './frontmatter.js';
 
 export type VerifyResult = { ok: boolean; command: string; stdout: string; stderr: string };
 export type RepoLayout = 'skillrepo' | 'apm';
@@ -18,6 +18,11 @@ export type RepoInventory = {
   skillIds: string[];
   agentNames: string[];
   agentSources: AgentSource[];
+};
+
+export type DiscoveredOpenCodeSkill = {
+  id: string;
+  location?: string;
 };
 
 type AgentOwnershipLink = {
@@ -419,12 +424,7 @@ async function collectSkillIds(skillsDir: string, strictDuplicates: boolean): Pr
   for (const path of await walkFiles(skillsDir)) {
     if (basename(path) !== 'SKILL.md') continue;
     const meta = frontmatter(await readFile(path, 'utf8'));
-    if (Object.prototype.hasOwnProperty.call(meta, 'name') && typeof meta.name !== 'string') {
-      throw new Error(`${path}: skill frontmatter name must be a string`);
-    }
-    const id = typeof meta.name === 'string' && meta.name.trim()
-      ? meta.name.trim()
-      : basename(dirname(path));
+    const id = stableSkillId(meta, path);
     const previous = seen.get(id);
     if (previous && strictDuplicates) {
       throw new Error(`Duplicate skill ID '${id}' in ${path} (also ${previous})`);
@@ -1018,7 +1018,10 @@ export function runOpenCode(args: string[], env = process.env): Promise<VerifyRe
   return run;
 }
 
-function parseDiscoveredSkillIds(output: string): Set<string> | undefined {
+// Shared parser for `opencode debug skill` output. Returns undefined when the
+// output is not a JSON array so callers can distinguish unusable discovery
+// output from an empty inventory. Entries without a usable name are skipped.
+function parseDiscoveredSkills(output: string): DiscoveredOpenCodeSkill[] | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
@@ -1028,13 +1031,43 @@ function parseDiscoveredSkillIds(output: string): Set<string> | undefined {
 
   if (!Array.isArray(parsed)) return undefined;
 
-  const ids = new Set<string>();
+  const skills: DiscoveredOpenCodeSkill[] = [];
   for (const entry of parsed) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
     const name = (entry as Record<string, unknown>).name;
-    if (typeof name === 'string' && name.trim()) ids.add(name.trim());
+    if (typeof name !== 'string' || !name.trim()) continue;
+    const location = (entry as Record<string, unknown>).location;
+    skills.push({
+      id: name.trim(),
+      ...(typeof location === 'string' && location.trim() ? { location: location.trim() } : {}),
+    });
   }
-  return ids;
+  return skills;
+}
+
+function parseDiscoveredSkillIds(output: string): Set<string> | undefined {
+  const skills = parseDiscoveredSkills(output);
+  return skills ? new Set(skills.map(skill => skill.id)) : undefined;
+}
+
+// Read-only OpenCode skill inventory for consumers such as the APM audit. The
+// command runs through the existing file-backed transport because large
+// discovery documents are truncated on pipes. Distinct skill IDs are
+// normalized and sorted deterministically; location evidence is preserved
+// when the runtime reports it.
+export async function discoverOpenCodeSkills(env: NodeJS.ProcessEnv = process.env): Promise<DiscoveredOpenCodeSkill[]> {
+  const result = await runOpenCode(['debug', 'skill'], env);
+  if (!result.ok) {
+    throw new Error(`OpenCode skill discovery failed: ${result.command}: ${result.stderr.trim() || 'non-zero exit'}`);
+  }
+  const skills = parseDiscoveredSkills(result.stdout);
+  if (!skills) throw new Error('OpenCode skill discovery output is not valid JSON');
+
+  const byId = new Map<string, DiscoveredOpenCodeSkill>();
+  for (const skill of skills) {
+    if (!byId.has(skill.id)) byId.set(skill.id, skill);
+  }
+  return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
 }
 
 function containsIdentifier(output: string, id: string): boolean {

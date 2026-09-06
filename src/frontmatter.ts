@@ -1,4 +1,5 @@
 import matter from 'gray-matter';
+import { basename, dirname } from 'node:path';
 
 export type FrontmatterDocument = {
   data: Record<string, unknown>;
@@ -59,4 +60,15 @@ export function parseFrontmatter(content: string): FrontmatterDocument {
     content: parsed.content,
     hasFrontmatter: matter.test(content),
   };
+}
+
+// Single-file skill identity shared by repository registration and the APM
+// audit: a string frontmatter name wins, otherwise the skill directory
+// basename is the stable identity. A present-but-non-string name is invalid.
+export function stableSkillId(data: Record<string, unknown>, sourcePath: string): string {
+  if (Object.prototype.hasOwnProperty.call(data, 'name') && typeof data.name !== 'string') {
+    throw new Error(`${sourcePath}: skill frontmatter name must be a string`);
+  }
+  const name = typeof data.name === 'string' ? data.name.trim() : '';
+  return name || basename(dirname(sourcePath));
 }

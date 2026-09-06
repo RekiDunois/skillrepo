@@ -163,20 +163,49 @@ function looksPlaceholder(value: string): boolean {
   return value.includes('${') || value.includes('{{') || value.includes('<') || lower.includes('example') || lower.includes('placeholder') || lower.includes('changeme') || lower.includes('your_') || lower.includes('your-') || lower.includes('dummy') || lower.includes('redacted') || lower.includes('xxxxx') || lower.includes('*****') || /^test[-_]/i.test(value);
 }
 
-function scanTextContent(audit: MutableRepoAudit, relPath: string, text: string): void {
+// Shared read-only text/content detector used by the repository commit-readiness
+// scan and by consumers such as the APM audit. Credential-like findings keep
+// the redaction behavior: the finding is reported without echoing the value.
+export type TextAuditFinding = {
+  severity: AuditSeverity;
+  code: string;
+  detail: string;
+};
+
+export function detectTextAuditFindings(path: string, text: string): TextAuditFinding[] {
+  const findings: TextAuditFinding[] = [];
   for (const detector of HIGH_CONFIDENCE_SECRETS) {
     detector.pattern.lastIndex = 0;
-    if (detector.pattern.test(text)) addFinding(audit, { severity: 'blocker', code: detector.code, path: relPath, detail: detector.label });
+    if (detector.pattern.test(text)) findings.push({ severity: 'blocker', code: detector.code, detail: detector.label });
   }
   const literal = /\b(api[_-]?key|access[_-]?token|auth[_-]?token|secret|password)\b\s*[:=]\s*["']?([^"'\s#,;]{12,})/gi;
   for (const match of text.matchAll(literal)) {
     const value = match[2] ?? '';
     if (!value || looksPlaceholder(value)) continue;
-    addFinding(audit, { severity: 'review', code: 'credential-like-literal', path: relPath, detail: 'credential-like assignment contains a non-placeholder literal; value is intentionally not shown' });
+    findings.push({ severity: 'review', code: 'credential-like-literal', detail: 'credential-like assignment contains a non-placeholder literal; value is intentionally not shown' });
     break;
   }
   if (/\/Users\/[^/\s'"`]+\/|\/home\/[^/\s'"`]+\/|[A-Za-z]:[\\/]Users[\\/][^\\/\s'"`]+[\\/]/i.test(text)) {
-    addFinding(audit, { severity: 'review', code: 'absolute-home-path', path: relPath, detail: 'contains an absolute user-home path; review for privacy and portability' });
+    findings.push({ severity: 'review', code: 'absolute-home-path', detail: 'contains an absolute user-home path; review for privacy and portability' });
+  }
+  return findings;
+}
+
+// Fail-safe predicate for consumers that build user-visible findings from
+// source-derived text such as path literals: true when the text matches a
+// high-confidence secret pattern or is placeholder-shaped, so the text must
+// not be echoed back into finding output.
+export function containsSensitiveCredentialText(text: string): boolean {
+  for (const detector of HIGH_CONFIDENCE_SECRETS) {
+    detector.pattern.lastIndex = 0;
+    if (detector.pattern.test(text)) return true;
+  }
+  return looksPlaceholder(text);
+}
+
+function scanTextContent(audit: MutableRepoAudit, relPath: string, text: string): void {
+  for (const finding of detectTextAuditFindings(relPath, text)) {
+    addFinding(audit, { severity: finding.severity, code: finding.code, path: relPath, detail: finding.detail });
   }
 }
 

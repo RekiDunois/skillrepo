@@ -82,6 +82,28 @@ function hasSegment(item: PortabilityItem, kind: PortabilityKind): boolean {
   return item.segments.some(segment => segment.kind === kind);
 }
 
+// Shared read-only classification of home-path occurrences in a single file.
+// The migration portability review and other consumers (such as the APM audit)
+// both use this primitive so the line/segment semantics stay identical.
+export type PortabilityTextClassification = {
+  hitLines: number[];
+  segments: PortabilitySegment[];
+  kind: PortabilityKind;
+};
+
+export function classifyPortabilityText(path: string, text: string): PortabilityTextClassification {
+  const lines = text.split(/\r?\n/);
+  const hitIndexes = lines
+    .map((line, index) => (HOME_PATH.test(line) ? index : -1))
+    .filter(index => index >= 0);
+  const segments = classifySegments(path, lines, hitIndexes);
+  return {
+    hitLines: hitIndexes.map(index => index + 1),
+    segments,
+    kind: conservativeKind(segments),
+  };
+}
+
 export async function classifyMigrationPortability(options: {
   planPath: string;
   targetRoot: string;
@@ -96,20 +118,16 @@ export async function classifyMigrationPortability(options: {
     for (const finding of findings) {
       const file = join(repo.repoPath, finding.path);
       const text = await readFile(file, 'utf8');
-      const lines = text.split(/\r?\n/);
-      const hitIndexes = lines
-        .map((line, index) => HOME_PATH.test(line) ? index : -1)
-        .filter(index => index >= 0);
+      const classified = classifyPortabilityText(finding.path, text);
 
-      if (!hitIndexes.length) throw new Error(`Portability finding no longer matches file contents: ${file}`);
+      if (!classified.hitLines.length) throw new Error(`Portability finding no longer matches file contents: ${file}`);
 
-      const segments = classifySegments(finding.path, lines, hitIndexes);
       items.push({
         repoId: repo.repoId,
         path: finding.path,
-        kind: conservativeKind(segments),
-        lines: hitIndexes.map(index => index + 1),
-        segments,
+        kind: classified.kind,
+        lines: classified.hitLines,
+        segments: classified.segments,
       });
     }
   }
