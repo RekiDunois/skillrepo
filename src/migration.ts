@@ -22,6 +22,21 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { parseFrontmatter } from './frontmatter.js';
+import { renderOpenApmManifest } from './openapm.js';
+import {
+  APM_DIRECTORY,
+  AGENTS_DIRECTORY,
+  PROJECTION_MARKER_NAME,
+  SKILLS_DIRECTORY,
+  agentEntryPointFileName,
+  agentNameFromEntryPointFileName,
+  relativeSkillDirectory,
+  selectLayoutStrategy,
+  stageProjection,
+  validateManagedProjection,
+  type PackageComposition,
+  type PackageLayoutStrategy,
+} from './layout.js';
 import {
   agentRegistrationPath,
   assertNoConfiguredIdentifierCollisions,
@@ -176,6 +191,35 @@ type JournalRegistration = {
   prospectiveConfigFingerprint: string;
 };
 
+// A repository `apm.yml` manifest owned or preserved by the transaction. A
+// manifest that already existed is never written; the transaction only pins
+// its bytes so later phases and rollback can prove it stayed byte-identical.
+type JournalManifest = {
+  repoId: string;
+  path: string;
+  preExisting: boolean;
+  state: 'create-intent' | 'created' | 'preserved';
+  mode?: number;
+  createdFingerprint?: string;
+  createdIdentity?: PathIdentity;
+  preExistingFingerprint?: string;
+};
+
+// The managed root `skills/` Agent Skills projection of a mixed package. The
+// staged tree and the published tree are both transaction-owned; the recorded
+// fingerprint plus the marker proof decides every resume and rollback decision.
+type JournalProjection = {
+  repoId: string;
+  sourceDir: string;
+  targetDir: string;
+  stagePath: string;
+  markerPath: string;
+  fingerprint: string;
+  state: 'staging-intent' | 'staged' | 'published';
+  stagedFingerprint?: string;
+  publishedIdentity?: PathIdentity;
+};
+
 type RuntimeVerificationRecord = {
   phase: RuntimeVerificationPhase;
   ok: boolean;
@@ -219,6 +263,9 @@ type MigrationJournal = {
     rollbackState?: 'pending' | 'restoring' | 'restored';
   };
   registration?: JournalRegistration;
+  manifests?: JournalManifest[];
+  projections?: JournalProjection[];
+  layoutStrategies?: Record<string, PackageLayoutStrategy>;
   skillMappings: Array<SkillMapping & { operationId: string }>;
   verification: { requested: boolean; passed: boolean };
   targetGit?: Record<string, MigrationGitState>;
@@ -242,6 +289,14 @@ type LegacyMigrationJournal = {
 
 type LoadedMigrationJournal = MigrationJournal | LegacyMigrationJournal;
 
+type PreflightManifest = {
+  repoId: string;
+  path: string;
+  preExisting: boolean;
+  mode?: number;
+  preExistingFingerprint?: string;
+};
+
 type PreflightResult = {
   operations: MoveOperation[];
   repositories: string[];
@@ -250,6 +305,8 @@ type PreflightResult = {
   skillMappings: UnboundSkillMapping[];
   prospectiveConfig: ReturnType<typeof prospectiveOpenCodeConfig>;
   existingInventories: Map<string, RepoInventory>;
+  strategies: Map<string, PackageLayoutStrategy>;
+  manifests: PreflightManifest[];
 };
 
 export type MigrationApplyOptions = {
@@ -278,6 +335,7 @@ export type MigrationApplyResult = {
   rollbackStatus?: 'not-needed' | 'rollback-complete' | 'rollback-incomplete';
   configPath: string;
   skillMappings: SkillMapping[];
+  layoutStrategies: Record<string, PackageLayoutStrategy>;
   verified: boolean;
   git: Record<string, MigrationGitState>;
   runtimeVerification: RuntimeVerificationRecord[];
@@ -444,6 +502,41 @@ function normalizeLibSpec(spec: string): string {
   return normalized;
 }
 
+// Primitive composition of a plan repository. `libs` are repository support
+// files and never force the canonical `.apm` layout by themselves.
+function planRepoComposition(repo: MigrationRepoPlan): PackageComposition | undefined {
+  const hasSkills = (repo.skills ?? []).length > 0;
+  const hasApmOnlyPrimitives = (repo.agents ?? []).length > 0;
+  if (!hasSkills && !hasApmOnlyPrimitives) return undefined;
+  return { hasSkills, hasApmOnlyPrimitives };
+}
+
+function planRepoStrategy(repo: MigrationRepoPlan): PackageLayoutStrategy | undefined {
+  const composition = planRepoComposition(repo);
+  return composition ? selectLayoutStrategy(composition) : undefined;
+}
+
+export function planLayoutStrategies(plan: MigrationPlan): Map<string, PackageLayoutStrategy> {
+  const strategies = new Map<string, PackageLayoutStrategy>();
+  for (const repo of plan.repositories) {
+    if (repo.action !== 'CREATE_AND_MOVE') continue;
+    const strategy = planRepoStrategy(repo);
+    if (strategy) strategies.set(repo.id, strategy);
+  }
+  return strategies;
+}
+
+function strategySkillDirectory(strategy: PackageLayoutStrategy): string | undefined {
+  return relativeSkillDirectory(strategy);
+}
+
+function strategyAgentDirectory(strategy: PackageLayoutStrategy): string | undefined {
+  if (strategy === 'apm-canonical' || strategy === 'apm-canonical-with-skill-projection') {
+    return join(APM_DIRECTORY, AGENTS_DIRECTORY);
+  }
+  return undefined;
+}
+
 function buildOperations(plan: MigrationPlan, sourceRoot: string, targetRoot: string): MoveOperation[] {
   const operations: MoveOperation[] = [];
 
@@ -451,6 +544,8 @@ function buildOperations(plan: MigrationPlan, sourceRoot: string, targetRoot: st
     if (repo.action !== 'CREATE_AND_MOVE') continue;
     assertRepoId(repo.id);
     const repoRoot = resolveWithin(targetRoot, repo.id);
+    const strategy = planRepoStrategy(repo);
+    const skillDirectory = strategy ? strategySkillDirectory(strategy) : undefined;
 
     for (const skill of repo.skills ?? []) {
       assertLeafName(skill, 'skill name');
@@ -459,7 +554,7 @@ function buildOperations(plan: MigrationPlan, sourceRoot: string, targetRoot: st
         kind: 'skill',
         repoId: repo.id,
         source: resolveWithin(sourceRoot, relativeSource),
-        target: resolveWithin(repoRoot, join('skills', skill)),
+        target: resolveWithin(repoRoot, join(skillDirectory ?? SKILLS_DIRECTORY, skill)),
         relativeSource,
       });
     }
@@ -467,11 +562,12 @@ function buildOperations(plan: MigrationPlan, sourceRoot: string, targetRoot: st
     for (const agent of repo.agents ?? []) {
       assertLeafName(agent, 'agent file');
       const relativeSource = join('agents', agent);
+      const agentDirectory = strategy ? strategyAgentDirectory(strategy) : AGENTS_DIRECTORY;
       operations.push({
         kind: 'agent',
         repoId: repo.id,
         source: resolveWithin(sourceRoot, relativeSource),
-        target: resolveWithin(repoRoot, join('agents', agent)),
+        target: resolveWithin(repoRoot, join(agentDirectory ?? AGENTS_DIRECTORY, agentEntryPointFileName(agent))),
         relativeSource,
       });
     }
@@ -662,7 +758,14 @@ async function validateOperationSource(operation: MoveOperation): Promise<MoveOp
     };
   } else if (operation.kind === 'agent' && operation.target.endsWith('.md')) {
     const meta = await readFrontmatter(operation.source);
-    result = { ...result, expectedAgentName: stableAgentName(operation.source, meta) };
+    if (Object.prototype.hasOwnProperty.call(meta, 'name') && typeof meta.name !== 'string') {
+      throw new Error(`${operation.source}: frontmatter name must be a string`);
+    }
+    // The stable identity follows the canonical target entrypoint name, so a
+    // source already named `name.agent.md` keeps the same identity it will
+    // have after migration.
+    const explicit = typeof meta.name === 'string' ? meta.name.trim() : '';
+    result = { ...result, expectedAgentName: explicit || agentNameFromEntryPointFileName(basename(operation.target)) };
   }
   return result;
 }
@@ -673,9 +776,16 @@ async function inspectExistingTarget(repoPath: string): Promise<RepoInventory | 
   if (repoStat.isSymbolicLink()) throw new Error(`Refusing symlinked migration target repository: ${repoPath}`);
   if (!repoStat.isDirectory()) throw new Error(`Migration target repository is not a directory: ${repoPath}`);
 
-  const hasSkills = await lexists(join(repoPath, 'skills'));
-  const hasAgents = await lexists(join(repoPath, 'agents'));
-  if (!hasSkills && !hasAgents) return undefined;
+  // A bare apm.yml (e.g. a composition-neutral init skeleton) has no inspectable
+  // skill or agent content; its bytes are owned by the manifest preflight.
+  const layoutMarkers = [
+    join(repoPath, SKILLS_DIRECTORY),
+    join(repoPath, AGENTS_DIRECTORY),
+    join(repoPath, APM_DIRECTORY, SKILLS_DIRECTORY),
+    join(repoPath, APM_DIRECTORY, AGENTS_DIRECTORY),
+  ];
+  const present = await Promise.all(layoutMarkers.map(marker => lexists(marker)));
+  if (!present.some(Boolean)) return undefined;
   return await inspectRepo(repoPath);
 }
 
@@ -684,6 +794,7 @@ async function preflight(
   sourceRoot: string,
   targetRoot: string,
   configSnapshot: OpenCodeConfigSnapshot,
+  strategies: Map<string, PackageLayoutStrategy>,
 ): Promise<PreflightResult> {
   assertNoOverlaps(operationsInput, sourceRoot, targetRoot);
   const sourceRootStat = await lstat(sourceRoot);
@@ -780,9 +891,53 @@ async function preflight(
     const path = agentRegistrationPath(join(targetRoot, repoId));
     const pathStat = await tryLstat(path);
     if (!pathStat) continue;
-    if (!pathStat.isSymbolicLink() || resolve(dirname(path), await readlink(path)) !== join(targetRoot, repoId, 'agents')) {
+    const expectedAgentTarget = inventory?.agentsDir
+      ?? join(targetRoot, repoId, strategyAgentDirectory(strategies.get(repoId) ?? 'apm-canonical') ?? AGENTS_DIRECTORY);
+    if (!pathStat.isSymbolicLink() || resolve(dirname(path), await readlink(path)) !== expectedAgentTarget) {
       throw new Error(`Agent symlink collision: ${path}`);
     }
+  }
+
+  // Managed projections and repository manifests are transaction-generated
+  // artifacts rather than move operations, so their target paths need their
+  // own preflight checks before anything is staged.
+  for (const [repoId, strategy] of strategies) {
+    if (strategy !== 'apm-canonical-with-skill-projection' || !repositories.includes(repoId)) continue;
+    const targetDir = join(targetRoot, repoId, SKILLS_DIRECTORY);
+    if (await lexists(targetDir)) throw new Error(`Migration target already exists: ${targetDir}`);
+    for (const operation of operations) {
+      if (operation.repoId !== repoId) continue;
+      if (pathsOverlap(targetDir, operation.target) || pathsOverlap(targetDir, operation.source)) {
+        throw new Error(`Migration path overlaps the managed skills projection: ${targetDir}`);
+      }
+    }
+  }
+
+  const manifests: PreflightManifest[] = [];
+  for (const repoId of repositories) {
+    const strategy = strategies.get(repoId);
+    if (!strategy) continue;
+    const manifestPath = join(targetRoot, repoId, 'apm.yml');
+    for (const operation of operations) {
+      if (operation.repoId === repoId && pathsOverlap(manifestPath, operation.target)) {
+        throw new Error(`Migration target overlaps the repository manifest: ${manifestPath}`);
+      }
+    }
+    const manifestStat = await tryLstat(manifestPath);
+    if (!manifestStat) {
+      manifests.push({ repoId, path: manifestPath, preExisting: false });
+      continue;
+    }
+    if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) {
+      throw new Error(`Refusing to migrate across a non-regular apm.yml manifest: ${manifestPath}`);
+    }
+    manifests.push({
+      repoId,
+      path: manifestPath,
+      preExisting: true,
+      mode: manifestStat.mode & 0o7777,
+      preExistingFingerprint: await fingerprintPath(manifestPath),
+    });
   }
 
   for (const repoId of repositories) {
@@ -797,7 +952,16 @@ async function preflight(
     const inventory = existingInventories.get(repoId);
     return operations.some(operation => operation.repoId === repoId && operation.kind === 'skill') || Boolean(inventory?.skillsDir);
   });
-  const skillSources = skillRepoIds.map(repoId => join(targetRoot, repoId, 'skills'));
+  // Registration plans always name the authoritative skill source selected by
+  // the layout policy; the generated root projection of a mixed package is
+  // never registered.
+  const skillSources = skillRepoIds.map(repoId => {
+    const inventory = existingInventories.get(repoId);
+    const strategy = strategies.get(repoId);
+    const relativeDir = strategy ? strategySkillDirectory(strategy) : undefined;
+    if (relativeDir) return join(targetRoot, repoId, relativeDir);
+    return inventory?.skillsDir ?? join(targetRoot, repoId, SKILLS_DIRECTORY);
+  });
 
   await assertNoConfiguredIdentifierCollisions(
     [...expectedSkillIds, ...existingSkillIds],
@@ -819,6 +983,8 @@ async function preflight(
     skillMappings,
     prospectiveConfig,
     existingInventories,
+    strategies,
+    manifests,
   };
 }
 
@@ -1230,6 +1396,225 @@ async function assertStagingOwner(journal: MigrationJournal): Promise<void> {
   const metadata = await readJson(journal.stagingMarkerPath);
   if (metadata.transactionId !== journal.transactionId || metadata.stagingRoot !== journal.stagingRoot) {
     throw new Error(`Staging directory owner mismatch: ${journal.stagingRoot}`);
+  }
+}
+
+const MANIFEST_MODE = 0o644;
+
+// Content-only fingerprint of a transaction-created manifest. Deliberately
+// mode-free so creation under any umask stays recognizable; a manifest is only
+// adopted or removed when its bytes are exactly what this transaction renders.
+function manifestContentFingerprint(repoId: string): string {
+  return fingerprintBuffer('apm-manifest\0', Buffer.from(renderOpenApmManifest(repoId), 'utf8'));
+}
+
+async function manifestMatchesCreatedContent(manifest: JournalManifest): Promise<boolean> {
+  if (!manifest.createdFingerprint) return false;
+  try {
+    return fingerprintBuffer('apm-manifest\0', await readFile(manifest.path)) === manifest.createdFingerprint;
+  } catch {
+    return false;
+  }
+}
+
+function projectionRepoIds(journal: MigrationJournal): string[] {
+  return [...new Set(journal.layoutStrategies
+    ? Object.entries(journal.layoutStrategies)
+      .filter(([, strategy]) => strategy === 'apm-canonical-with-skill-projection')
+      .map(([repoId]) => repoId)
+    : [])];
+}
+
+// Creates (or adopts) every transaction-owned repository manifest. The intent
+// is journaled before the first byte is written, so a crash at any boundary
+// leaves a provably owned or provably absent artifact.
+async function ensureRepositoryManifests(journal: MigrationJournal): Promise<void> {
+  for (const manifest of journal.manifests ?? []) {
+    if (manifest.preExisting) continue;
+    const existingStat = await tryLstat(manifest.path);
+    if (!existingStat) {
+      await ensureDirectoryPath(dirname(manifest.path), journal);
+      const handle = await open(
+        manifest.path,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+        MANIFEST_MODE,
+      );
+      try {
+        await handle.writeFile(renderOpenApmManifest(manifest.repoId), { encoding: 'utf8' });
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      crashAfter('manifest-created');
+      manifest.createdFingerprint = manifestContentFingerprint(manifest.repoId);
+      manifest.createdIdentity = await pathIdentity(manifest.path);
+      if (!manifest.createdIdentity) throw new Error(`Migration manifest disappeared after creation: ${manifest.path}`);
+      manifest.state = 'created';
+      await persistJournal(journal);
+      continue;
+    }
+    if (manifest.state !== 'created') throw new Error(`Migration manifest path already exists: ${manifest.path}`);
+    if (!(await manifestMatchesCreatedContent(manifest))) {
+      throw new Error(`Migration manifest was replaced outside transaction: ${manifest.path}`);
+    }
+  }
+}
+
+// Stages and publishes the managed root skills projection of every mixed
+// repository. Staging copies the final canonical .apm/skills tree into a
+// transaction-owned staging directory, writes the marker, and publishes the
+// complete tree with one atomic rename only after the canonical source is in
+// place.
+async function prepareAndPublishProjections(journal: MigrationJournal): Promise<void> {
+  for (const repoId of projectionRepoIds(journal)) {
+    const sourceDir = join(journal.targetRoot, repoId, APM_DIRECTORY, SKILLS_DIRECTORY);
+    const targetDir = join(journal.targetRoot, repoId, SKILLS_DIRECTORY);
+    const stagePath = join(journal.stagingRoot, `projection-${repoId}`);
+    let record = journal.projections?.find(candidate => candidate.repoId === repoId);
+    if (!record) {
+      record = {
+        repoId,
+        sourceDir,
+        targetDir,
+        stagePath,
+        markerPath: join(targetDir, PROJECTION_MARKER_NAME),
+        fingerprint: '',
+        state: 'staging-intent',
+      };
+      journal.projections ??= [];
+      journal.projections.push(record);
+      await persistJournal(journal);
+      crashAfter('projection-staging-intent');
+    }
+    if (record.state === 'published') continue;
+
+    if (record.state === 'staging-intent') {
+      // Anything under the transaction-owned staging root can be rebuilt.
+      await rm(record.stagePath, { recursive: true, force: true });
+      const fingerprint = await stageProjection(record.sourceDir, record.stagePath);
+      record.fingerprint = fingerprint;
+      record.stagedFingerprint = await fingerprintPath(record.stagePath);
+      record.state = 'staged';
+      await persistJournal(journal);
+      crashAfter('projection-staged');
+    }
+
+    if (record.state === 'staged') {
+      if (!record.stagedFingerprint || (await fingerprintPath(record.stagePath)) !== record.stagedFingerprint) {
+        throw new Error(`Staged projection was modified outside transaction: ${record.stagePath}`);
+      }
+      if (await lexists(record.targetDir)) {
+        throw new Error(`Projection target already exists: ${record.targetDir}`);
+      }
+      await ensureDirectoryPath(dirname(record.targetDir), journal);
+      await rename(record.stagePath, record.targetDir);
+      crashAfter('projection-published');
+      record.publishedIdentity = await pathIdentity(record.targetDir);
+      if (!record.publishedIdentity) throw new Error(`Published projection disappeared: ${record.targetDir}`);
+      record.state = 'published';
+      await persistJournal(journal);
+    }
+  }
+}
+
+// A published projection may only be removed when the journal record, the
+// marker, and both tree fingerprints prove the projection still belongs to
+// this transaction. Externally modified projections fail closed instead.
+async function ownedProjectionIssues(projection: JournalProjection): Promise<string[]> {
+  const repoRoot = dirname(projection.targetDir);
+  const validation = await validateManagedProjection(repoRoot);
+  if (!validation.ok) {
+    return [`Refusing to remove projection without valid ownership proof: ${projection.targetDir}: ${validation.issues.map(issue => issue.detail).join('; ')}`];
+  }
+  let marker: { fingerprint?: unknown };
+  try {
+    marker = await readJson(projection.markerPath);
+  } catch (error) {
+    return [`Projection marker is not readable: ${projection.markerPath}: ${error instanceof Error ? error.message : String(error)}`];
+  }
+  if (marker.fingerprint !== projection.fingerprint) {
+    return [`Projection marker fingerprint does not match the transaction journal: ${projection.markerPath}`];
+  }
+  return [];
+}
+
+async function rollbackProjections(journal: MigrationJournal): Promise<string[]> {
+  const issues: string[] = [];
+  for (const projection of [...(journal.projections ?? [])].reverse()) {
+    if (await lexists(projection.stagePath)) {
+      // Staging content is transaction-owned by construction; only a broken
+      // staging owner marker could make this unsafe, and cleanStaging below
+      // validates that marker before removing the staging root itself.
+      await rm(projection.stagePath, { recursive: true, force: true });
+    }
+    if (!(await lexists(projection.targetDir))) continue;
+    const ownershipIssues = await ownedProjectionIssues(projection);
+    if (ownershipIssues.length) {
+      issues.push(...ownershipIssues);
+      continue;
+    }
+    await rm(projection.targetDir, { recursive: true, force: true });
+    crashAfter('rollback-projection-removed');
+  }
+  return issues;
+}
+
+async function rollbackManifests(journal: MigrationJournal): Promise<string[]> {
+  const issues: string[] = [];
+  for (const manifest of journal.manifests ?? []) {
+    if (manifest.preExisting) {
+      // A pre-existing manifest is never deleted and must have survived the
+      // transaction byte-for-byte.
+      if (!(await lexists(manifest.path))) {
+        issues.push(`Pre-existing manifest disappeared during migration: ${manifest.path}`);
+        continue;
+      }
+      if (!manifest.preExistingFingerprint || (await fingerprintPath(manifest.path)) !== manifest.preExistingFingerprint) {
+        issues.push(`Pre-existing manifest changed during migration; refusing rollback: ${manifest.path}`);
+      }
+      continue;
+    }
+    if (!(await lexists(manifest.path))) continue;
+    if (!(await manifestMatchesCreatedContent(manifest))) {
+      issues.push(`Refusing to remove externally modified migration manifest: ${manifest.path}`);
+      continue;
+    }
+    await unlink(manifest.path);
+    crashAfter('rollback-manifest-removed');
+  }
+  return issues;
+}
+
+// Final-state verification shared by the pre-commit and committed checks:
+// projections must be published, valid, and journal-consistent, and manifests
+// must match their recorded bytes.
+async function assertProjectionsAndManifestsCurrent(journal: MigrationJournal): Promise<void> {
+  for (const projection of journal.projections ?? []) {
+    if (projection.state !== 'published') {
+      throw new Error(`Transaction projection is not published: ${projection.repoId}`);
+    }
+    if (await lexists(projection.stagePath)) {
+      throw new Error(`Committed transaction still has projection staging content: ${projection.stagePath}`);
+    }
+    const validation = await validateManagedProjection(dirname(projection.targetDir));
+    if (!validation.ok) {
+      throw new Error(`Committed transaction projection is invalid: ${projection.targetDir}: ${validation.issues.map(issue => issue.detail).join('; ')}`);
+    }
+    const marker = await readJson(projection.markerPath);
+    if (marker.fingerprint !== projection.fingerprint) {
+      throw new Error(`Committed projection marker does not match the transaction journal: ${projection.markerPath}`);
+    }
+  }
+  for (const manifest of journal.manifests ?? []) {
+    if (manifest.preExisting) {
+      if (!manifest.preExistingFingerprint || (await fingerprintPath(manifest.path)) !== manifest.preExistingFingerprint) {
+        throw new Error(`Pre-existing manifest does not match its recorded bytes: ${manifest.path}`);
+      }
+      continue;
+    }
+    if (!(await manifestMatchesCreatedContent(manifest))) {
+      throw new Error(`Transaction manifest does not match its recorded bytes: ${manifest.path}`);
+    }
   }
 }
 
@@ -2462,6 +2847,9 @@ async function cleanStaging(journal: MigrationJournal): Promise<string[]> {
         ])
           .filter(path => path && dirname(path) === journal.stagingRoot)
           .map(path => basename(path)),
+        ...(journal.projections ?? [])
+          .filter(projection => dirname(projection.stagePath) === journal.stagingRoot)
+          .map(projection => basename(projection.stagePath)),
       ]);
       const unknown = entries.filter(name => !ownedEntries.has(name));
       if (unknown.length) return [`Unknown files remain in transaction staging: ${unknown.join(', ')}`];
@@ -2619,6 +3007,10 @@ async function rollbackTransaction(journal: MigrationJournal): Promise<{ complet
   }
   issues.push(...await rollbackConfig(journal));
   issues.push(...await removeAgentRegistrationLinks(journal));
+  // Generated artifacts are removed before the moved operations and created
+  // directories are cleaned, so repository roots become empty again.
+  issues.push(...await rollbackProjections(journal));
+  issues.push(...await rollbackManifests(journal));
   for (const operation of [...journal.operations].reverse()) {
     try {
       issues.push(...await restoreMovedOperation(operation, journal));
@@ -2690,6 +3082,7 @@ async function validateCommittedState(journal: MigrationJournal): Promise<void> 
     throw new Error(`Committed transaction config identity does not match: ${snapshot.path}`);
   }
   if (!journal.registration) throw new Error(`Committed transaction has no registration record: ${journal.transactionId}`);
+  await assertProjectionsAndManifestsCurrent(journal);
 
   for (const operation of journal.operations) {
     if (operation.state !== 'complete' || !operation.targetFingerprint) {
@@ -2785,6 +3178,72 @@ async function validateInterruptedState(journal: MigrationJournal): Promise<void
     if (operation.fileCompatibilityCreated) {
       const issues = await verifyFileCompatibility(operation);
       if (issues.length) throw new Error(issues.join('\n'));
+    }
+  }
+
+  for (const manifest of journal.manifests ?? []) {
+    const manifestStat = await tryLstat(manifest.path);
+    if (manifest.preExisting) {
+      if (!manifestStat) throw new Error(`Interrupted transaction lost its pre-existing manifest: ${manifest.path}`);
+      if (!manifest.preExistingFingerprint || (await fingerprintPath(manifest.path)) !== manifest.preExistingFingerprint) {
+        throw new Error(`Interrupted transaction pre-existing manifest was modified: ${manifest.path}`);
+      }
+      continue;
+    }
+    if (!manifestStat) continue;
+    if (manifest.state === 'created' && manifest.createdIdentity && !sameIdentity(identityFromStat(manifestStat), manifest.createdIdentity)) {
+      throw new Error(`Interrupted transaction manifest was replaced: ${manifest.path}`);
+    }
+    if (!manifest.createdFingerprint) throw new Error(`Interrupted transaction manifest lacks ownership proof: ${manifest.path}`);
+    if (!(await manifestMatchesCreatedContent(manifest))) {
+      throw new Error(`Interrupted transaction manifest was modified: ${manifest.path}`);
+    }
+  }
+
+  for (const projection of journal.projections ?? []) {
+    if (projection.state === 'published') {
+      if (await lexists(projection.stagePath)) {
+        throw new Error(`Interrupted transaction still has projection staging content: ${projection.stagePath}`);
+      }
+      const validation = await validateManagedProjection(dirname(projection.targetDir));
+      if (!validation.ok) {
+        throw new Error(`Interrupted transaction projection is invalid: ${projection.targetDir}: ${validation.issues.map(issue => issue.detail).join('; ')}`);
+      }
+      const marker = await readJson(projection.markerPath);
+      if (marker.fingerprint !== projection.fingerprint) {
+        throw new Error(`Interrupted transaction projection marker does not match its journal: ${projection.markerPath}`);
+      }
+      continue;
+    }
+    if (projection.state === 'staged') {
+      // A crash between the atomic publish and the journal update leaves a
+      // complete projection at the target while the journal still says staged.
+      // Adopt it only when the journal fingerprint, the marker, and both tree
+      // fingerprints prove ownership.
+      if (!(await lexists(projection.stagePath)) && await lexists(projection.targetDir)) {
+        const validation = await validateManagedProjection(dirname(projection.targetDir));
+        const marker = validation.ok ? await readJson(projection.markerPath).catch(() => undefined) : undefined;
+        if (!validation.ok || marker?.fingerprint !== projection.fingerprint) {
+          throw new Error(`Interrupted transaction projection publish cannot be proven: ${projection.targetDir}`);
+        }
+        projection.publishedIdentity = await pathIdentity(projection.targetDir);
+        projection.state = 'published';
+        await persistJournal(journal);
+        continue;
+      }
+      if (await lexists(projection.targetDir)) {
+        throw new Error(`Interrupted transaction has both projection staging and target: ${projection.targetDir}`);
+      }
+      if (!projection.stagedFingerprint || !(await lexists(projection.stagePath))
+        || (await fingerprintPath(projection.stagePath)) !== projection.stagedFingerprint) {
+        throw new Error(`Interrupted transaction projection staging was modified: ${projection.stagePath}`);
+      }
+      continue;
+    }
+    // staging-intent: the stage directory is transaction-owned and may be
+    // partial; only the target must not exist yet.
+    if (await lexists(projection.targetDir)) {
+      throw new Error(`Interrupted transaction projection target appeared before publication: ${projection.targetDir}`);
     }
   }
 
@@ -2959,6 +3418,7 @@ async function resultFromJournal(
     rollbackStatus: 'not-needed',
     configPath: journal.config.path,
     skillMappings: journal.skillMappings,
+    layoutStrategies: strategiesFromJournal(journal),
     verified: journal.verification.passed,
     git,
     runtimeVerification: journal.runtimeVerification?.records ?? [],
@@ -3050,6 +3510,17 @@ async function createJournal(
     prospectiveConfigText: preflightResult.prospectiveConfig.text,
     prospectiveConfigFingerprint: fingerprintText(preflightResult.prospectiveConfig.text),
     configDirectoryExisted,
+    manifests: preflightResult.manifests.map(manifest => ({
+      repoId: manifest.repoId,
+      path: manifest.path,
+      preExisting: manifest.preExisting,
+      state: manifest.preExisting ? 'preserved' : 'create-intent',
+      mode: manifest.mode,
+      createdFingerprint: manifest.preExisting ? undefined : manifestContentFingerprint(manifest.repoId),
+      preExistingFingerprint: manifest.preExistingFingerprint,
+    })),
+    projections: [],
+    layoutStrategies: Object.fromEntries(preflightResult.strategies),
     config: {
       path: configSnapshot.path,
       existed: configSnapshot.existed,
@@ -3091,6 +3562,10 @@ async function executeTransaction(
   if (canaryMoved && canary) {
     await prepareOperations(journal, [canary]);
     await moveOperation(canary, journal);
+    // The canary registers a partially moved repository. Its manifest must
+    // exist first because the shared layout policy rejects .apm source
+    // directories without one.
+    await ensureRepositoryManifests(journal);
     await registerTransaction(journal, preflightResult, true, [canary]);
     await runRuntimeVerification(journal, options, 'canary-runtime-verification', [canary]);
     const remaining = journal.operations.filter(operation => operation !== canary);
@@ -3105,6 +3580,12 @@ async function executeTransaction(
     if (canaryMoved && operation === canary) continue;
     await moveOperation(operation, journal);
   }
+
+  // Generated artifacts participate in the journaled transaction: manifests
+  // are created before the projections that depend on a complete canonical
+  // tree, and both complete before registration inspects the repositories.
+  await ensureRepositoryManifests(journal);
+  await prepareAndPublishProjections(journal);
 
   await registerTransaction(journal, preflightResult, options.verify !== false);
 
@@ -3133,6 +3614,7 @@ async function executeTransaction(
   await assertConfigPostWriteState(journal);
   await assertAgentRegistrationLinksCurrent(journal);
   await assertMigratedLayoutCurrent(journal);
+  await assertProjectionsAndManifestsCurrent(journal);
 
   const stagingIssues = await cleanStaging(journal);
   if (stagingIssues.length) throw new Error(stagingIssues.join('\n'));
@@ -3160,11 +3642,30 @@ async function executeTransaction(
     rollbackStatus: 'not-needed',
     configPath: journal.config.path,
     skillMappings: journal.skillMappings,
+    layoutStrategies: strategiesFromJournal(journal),
     verified: journal.verification.passed,
     git: journal.targetGit ?? {},
     runtimeVerification: journal.runtimeVerification?.records ?? [],
     runtimeVerificationSkipped: options.verify === false,
   };
+}
+
+// Layout strategies recorded by the transaction. Older journals predate the
+// field, so the value is re-derived from the recorded operation targets; those
+// journals can only match plans built by the same policy anyway.
+function strategiesFromJournal(journal: MigrationJournal): Record<string, PackageLayoutStrategy> {
+  if (journal.layoutStrategies) return journal.layoutStrategies;
+  const strategies: Record<string, PackageLayoutStrategy> = {};
+  for (const repoId of journal.repositories) {
+    const skillOps = journal.operations.filter(operation => operation.repoId === repoId && operation.kind === 'skill');
+    const agentOps = journal.operations.filter(operation => operation.repoId === repoId && operation.kind === 'agent');
+    strategies[repoId] = skillOps.length && agentOps.length
+      ? 'apm-canonical-with-skill-projection'
+      : skillOps.length
+        ? 'apm-root-skills'
+        : 'apm-canonical';
+  }
+  return strategies;
 }
 
 function ensureJournalIdentity(
@@ -3265,6 +3766,25 @@ function ensureJournalIdentity(
   }
   const configDirectory = dirname(journal.config.path);
   const registrationDirectory = opencodeConfigDir();
+  for (const manifest of journal.manifests ?? []) {
+    if (manifest.path !== join(targetRoot, manifest.repoId, 'apm.yml') || !isPathWithin(targetRoot, manifest.path)) {
+      throw new Error(`Migration journal contains an unsafe manifest path: ${manifest.repoId}`);
+    }
+  }
+  for (const projection of journal.projections ?? []) {
+    const expectedSource = join(targetRoot, projection.repoId, APM_DIRECTORY, SKILLS_DIRECTORY);
+    const expectedTarget = join(targetRoot, projection.repoId, SKILLS_DIRECTORY);
+    const expectedStage = join(expectedStaging, `projection-${projection.repoId}`);
+    if (
+      projection.sourceDir !== expectedSource
+      || projection.targetDir !== expectedTarget
+      || projection.stagePath !== expectedStage
+      || projection.markerPath !== join(expectedTarget, PROJECTION_MARKER_NAME)
+      || !isPathWithin(expectedStaging, projection.stagePath)
+    ) {
+      throw new Error(`Migration journal contains an unexpected projection path: ${projection.repoId}`);
+    }
+  }
   const createdDirectories = [
     ...journal.createdDirectories.map(created => created.path),
     ...(journal.creatingDirectories ?? []).map(created => created.path),
@@ -3387,7 +3907,7 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
     throw new Error(`No transaction journal matches this plan and roots; --resume refuses to guess filesystem state`);
   }
 
-  const preflightResult = await preflight(operationsInput, sourceRoot, targetRoot, configSnapshot);
+  const preflightResult = await preflight(operationsInput, sourceRoot, targetRoot, configSnapshot, planLayoutStrategies(plan));
   if (options.dryRun) {
     return {
       dryRun: true,
@@ -3403,6 +3923,7 @@ export async function applyMigration(options: MigrationApplyOptions): Promise<Mi
       rollbackStatus: 'not-needed',
       configPath: configSnapshot.path,
       skillMappings: preflightResult.skillMappings,
+      layoutStrategies: Object.fromEntries(preflightResult.strategies),
       verified: false,
       git: {},
       runtimeVerification: [],
