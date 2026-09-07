@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { globSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { globSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -417,16 +418,71 @@ function hasPackageManifest(repoRoot) {
 // Classification hint for a root skills directory that claims to be a managed
 // Agent Skills projection of an APM package. The marker is never treated as a
 // validity oracle: only strict schema-v1 well-formedness (exact field set and
-// fixed ownership values) is checked here, and fail-closed fingerprint
-// validation stays in `inspectRepo()`. "unrecognized" means a marker exists
-// but cannot be trusted, so the root tree must stay an authoring candidate
-// and produce a fail-closed ambiguity.
+// fixed ownership values) is checked here. "unrecognized" means a marker
+// exists but cannot be trusted, so the root tree must stay an authoring
+// candidate and produce a fail-closed ambiguity.
 const PROJECTION_HINT_ABSENT = 'absent';
 const PROJECTION_HINT_MANAGED = 'managed';
 const PROJECTION_HINT_UNRECOGNIZED = 'unrecognized';
+const PROJECTION_MARKER_NAME = '.skillrepo-projection.json';
+
+// Stable content fingerprint of a skill tree using sha256-tree-v1, mirroring
+// `fingerprintSkillTree()` in src/layout.ts: entries are enumerated
+// recursively, identified by normalized POSIX-style relative paths in
+// code-unit lexical order, and hashed as path + type + file bytes (or symlink
+// target text). Timestamps, inode numbers, permissions, and absolute paths
+// never influence the result. Throws when any entry cannot be read or typed;
+// callers must treat that as an invalid tree.
+function collectTreeEntriesSync(root, options = {}) {
+  const excludeTopLevel = options.excludeTopLevel;
+  const entries = [];
+
+  const walk = (directory, relativeDirectory) => {
+    const names = readdirSync(directory).sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+    for (const name of names) {
+      if (relativeDirectory === '' && excludeTopLevel?.has(name)) continue;
+      const path = join(directory, name);
+      const relativePath = relativeDirectory === '' ? name : `${relativeDirectory}/${name}`;
+      const entryStat = lstatSync(path);
+      if (entryStat.isSymbolicLink()) {
+        entries.push({ relativePath, type: 'symlink', linkTarget: readlinkSync(path) });
+      } else if (entryStat.isDirectory()) {
+        entries.push({ relativePath, type: 'directory' });
+        walk(path, relativePath);
+      } else if (entryStat.isFile()) {
+        entries.push({ relativePath, type: 'file', bytes: readFileSync(path) });
+      } else {
+        entries.push({ relativePath, type: 'other' });
+      }
+    }
+  };
+
+  walk(root, '');
+  entries.sort((left, right) => (left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0));
+  return entries;
+}
+
+function hashTreeEntriesSync(entries) {
+  const hash = createHash('sha256');
+  for (const entry of entries) {
+    hash.update('entry\0', 'utf8');
+    hash.update(`${entry.relativePath}\0${entry.type}\0`, 'utf8');
+    if (entry.type === 'file') hash.update(entry.bytes);
+    else if (entry.type === 'symlink') hash.update(entry.linkTarget ?? '', 'utf8');
+  }
+  return hash.digest('hex');
+}
+
+// Fingerprint of a projected root skills tree. Only the projection marker
+// itself is excluded; every other entry must match the authoritative tree.
+function fingerprintProjectedTreeSync(projectedRoot) {
+  return hashTreeEntriesSync(collectTreeEntriesSync(projectedRoot, {
+    excludeTopLevel: new Set([PROJECTION_MARKER_NAME]),
+  }));
+}
 
 function projectionMarkerHintSync(sourceRoot) {
-  const markerPath = join(sourceRoot, '.skillrepo-projection.json');
+  const markerPath = join(sourceRoot, PROJECTION_MARKER_NAME);
   let markerStat;
   try {
     markerStat = lstatSync(markerPath);
@@ -468,9 +524,25 @@ function projectionMarkerHintSync(sourceRoot) {
   return wellFormed ? PROJECTION_HINT_MANAGED : PROJECTION_HINT_UNRECOGNIZED;
 }
 
+// Fingerprint recorded by the projection marker, or null when it cannot be
+// read as a schema-v1 marker. Only reached after the strict shape check.
+function projectionFingerprintSync(sourceRoot) {
+  try {
+    const marker = JSON.parse(readFileSync(join(sourceRoot, PROJECTION_MARKER_NAME), 'utf8'));
+    return typeof marker?.fingerprint === 'string' ? marker.fingerprint : null;
+  } catch {
+    return null;
+  }
+}
+
 // True when the given skill source root is the projected compatibility view of
 // a mixed APM package: the repo has apm.yml, the canonical .apm/skills source
-// exists, and the root tree carries a well-formed managed-projection marker.
+// exists, the root tree carries a strictly well-formed managed-projection
+// marker, and both trees still fingerprint to the marker's sha256-tree-v1
+// value. A marker alone is never a validity oracle: any drift, missing entry,
+// unreadable path, or fingerprint mismatch on either side leaves the root
+// tree as a regular authoring candidate, so the dual tree keeps failing
+// closed instead of being silently hidden.
 function isManagedProjectionRoot(sourceRoot, kind) {
   if (kind !== 'skill') return false;
   if (basename(sourceRoot) !== 'skills') return false;
@@ -482,7 +554,16 @@ function isManagedProjectionRoot(sourceRoot, kind) {
   } catch {
     return false;
   }
-  return projectionMarkerHintSync(sourceRoot) === PROJECTION_HINT_MANAGED;
+  if (projectionMarkerHintSync(sourceRoot) !== PROJECTION_HINT_MANAGED) return false;
+  const fingerprint = projectionFingerprintSync(sourceRoot);
+  if (!fingerprint) return false;
+  try {
+    const canonicalFingerprint = hashTreeEntriesSync(collectTreeEntriesSync(canonicalRoot));
+    if (canonicalFingerprint !== fingerprint) return false;
+    return fingerprintProjectedTreeSync(sourceRoot) === fingerprint;
+  } catch {
+    return false;
+  }
 }
 
 function canonicalSourceRoot(kind, configuredSourceRoot, filePath) {
@@ -575,10 +656,11 @@ async function locate({ kind, name, config: explicitConfig, projectRoot: explici
       if (!identifiers.includes(name)) continue;
       const configuredSourceRoot = await realpath(root.path);
       const sourceRoot = canonicalSourceRoot(kind, configuredSourceRoot, file.path);
-      // A well-formed managed projection marker marks the root tree as
-      // generated output of a mixed APM package; it must never become a
-      // second authoring candidate. Unrecognized markers keep the fail-closed
-      // ambiguity, and authoritative validation stays in inspectRepo().
+      // A strictly well-formed marker whose sha256-tree-v1 fingerprints still
+      // match on both trees marks the root tree as generated output of a
+      // mixed APM package; it must never become a second authoring candidate.
+      // Stale, diverged, or unreadable projections keep the fail-closed
+      // ambiguity, and inspectRepo() re-validates with the same policy.
       if (authoring && isManagedProjectionRoot(sourceRoot, kind)) {
         const diagnostic = {
           path: file.path,
