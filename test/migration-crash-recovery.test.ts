@@ -96,6 +96,10 @@ const CRASH_POINTS = [
   'skill-compatibility-symlink-created',
   'file-compatibility-symlink-created',
   'agent-registration-symlink-created',
+  'manifest-created',
+  'projection-staging-intent',
+  'projection-staged',
+  'projection-published',
 ] as const;
 
 test('migration rollback recovers after each transactional crash point', { skip: process.platform === 'win32' }, async t => {
@@ -650,6 +654,31 @@ test('rollback preserves stage when its ownership proof disappears', { skip: pro
     });
     await access(operation.stagePath);
     await assert.rejects(access(operation.source));
+  } finally {
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('rollback refuses to remove a projection that was externally modified', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    // Crash after the atomic publish but before the journal recorded it.
+    await runCrash(f, 'projection-published');
+    // Externally diverge the published projection before resuming.
+    await writeFile(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md'), '---\nname: alpha\ndescription: externally edited\n---\n', 'utf8');
+
+    await withConfigDir(f.sourceRoot, async () => {
+      await assert.rejects(
+        () => applyMigration({ planPath: f.planPath, targetRoot: f.targetRoot, resume: true, verify: false }),
+        /rollback-incomplete|cannot be proven/,
+      );
+    });
+
+    // The externally modified projection survives untouched.
+    assert.equal(
+      await readFile(join(f.targetRoot, 'demo-repo', 'skills', 'alpha', 'SKILL.md'), 'utf8'),
+      '---\nname: alpha\ndescription: externally edited\n---\n',
+    );
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }

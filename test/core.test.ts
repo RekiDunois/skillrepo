@@ -255,3 +255,71 @@ test('register refuses to overwrite a broken agent symlink', async () => {
     await rm(f.root, { recursive: true, force: true });
   }
 });
+
+async function makeMixedManagedRepo(root: string, name: string): Promise<string> {
+  const repo = join(root, name);
+  await mkdir(join(repo, '.apm', 'skills', 'mixed-skill', 'scripts'), { recursive: true });
+  await mkdir(join(repo, '.apm', 'agents'), { recursive: true });
+  await writeFile(join(repo, 'apm.yml'), 'name: mixed-managed\n', 'utf8');
+  await writeFile(
+    join(repo, '.apm', 'skills', 'mixed-skill', 'SKILL.md'),
+    '---\nname: mixed-skill\ndescription: mixed\n---\n',
+    'utf8',
+  );
+  await writeFile(join(repo, '.apm', 'skills', 'mixed-skill', 'scripts', 'run.sh'), '#!/bin/sh\necho ok\n', 'utf8');
+  await writeFile(
+    join(repo, '.apm', 'agents', 'mixed-agent.agent.md'),
+    '---\ndescription: mixed\nmode: subagent\n---\n',
+    'utf8',
+  );
+
+  const { stageProjection } = await import('../src/layout.js');
+  await stageProjection(join(repo, '.apm', 'skills'), join(repo, 'skills'));
+  return repo;
+}
+
+test('mixed managed packages register only their authoritative .apm sources', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-mixed-managed-'));
+  const repo = await makeMixedManagedRepo(root, 'mixed-repo');
+  const configDir = join(root, 'opencode');
+  try {
+    await withConfigDir(configDir, async () => {
+      const inventory = await inspectRepo(repo);
+      assert.equal(inventory.layoutStrategy, 'apm-canonical-with-skill-projection');
+      assert.equal(inventory.skillsDir, join(repo, '.apm', 'skills'));
+      assert.equal(inventory.projectedSkillsDir, join(repo, 'skills'));
+
+      const result = await registerRepo(repo);
+      assert.equal(result.skillPath, join(repo, '.apm', 'skills'));
+      const config = JSON.parse(await readFile(join(configDir, 'opencode.jsonc'), 'utf8')) as {
+        skills?: { paths?: string[] };
+      };
+      assert.deepEqual(config.skills?.paths, [join(repo, '.apm', 'skills')]);
+      assert.equal(config.skills?.paths?.includes(join(repo, 'skills')), false);
+
+      await unregisterRepo(repo);
+      assert.deepEqual(
+        JSON.parse(await readFile(join(configDir, 'opencode.jsonc'), 'utf8')).skills.paths,
+        [],
+      );
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('register fails closed for an invalid managed projection', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-invalid-projection-'));
+  const repo = await makeMixedManagedRepo(root, 'diverged-repo');
+  const configDir = join(root, 'opencode');
+  try {
+    await writeFile(join(repo, 'skills', 'alpha-extra.txt'), 'external edit\n', 'utf8');
+    await withConfigDir(configDir, async () => {
+      await assert.rejects(() => registerRepo(repo), /Invalid managed skill projection/);
+      const configText = await readFile(join(configDir, 'opencode.jsonc'), 'utf8').catch(() => '');
+      assert.equal(configText.includes('diverged-repo'), false);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -25,15 +25,19 @@ export async function initRepo(inputPath: string, cwd = process.cwd(), layout: I
   }
 
   if (!targetExists) await mkdir(target, { recursive: true });
-  const sourceRoot = layout === 'apm' ? resolve(target, '.apm') : target;
-  await mkdir(resolve(sourceRoot, 'skills'), { recursive: true });
-  await mkdir(resolve(sourceRoot, 'agents'), { recursive: true });
   await writeFile(resolve(target, '.gitignore'), template, { encoding: 'utf8', flag: 'wx' });
+  // The default APM skeleton is composition-neutral (issue #42): it contains
+  // only the manifest and the ignore template. `.apm/`, root `skills/`, root
+  // `agents/`, and placeholder files are created by generation and migration
+  // once the package's primitive composition is actually known.
   if (layout === 'apm') {
     await writeFile(resolve(target, 'apm.yml'), renderOpenApmManifest(basename(target)), { encoding: 'utf8', flag: 'wx' });
+    return target;
   }
-  await writeFile(resolve(sourceRoot, 'skills', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
-  await writeFile(resolve(sourceRoot, 'agents', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
+  await mkdir(resolve(target, 'skills'), { recursive: true });
+  await mkdir(resolve(target, 'agents'), { recursive: true });
+  await writeFile(resolve(target, 'skills', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
+  await writeFile(resolve(target, 'agents', '.gitkeep'), '', { encoding: 'utf8', flag: 'wx' });
 
   return target;
 }

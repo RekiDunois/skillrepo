@@ -73,16 +73,16 @@ test('init creates a skeleton for a missing, empty, current, and absolute direct
   }
 });
 
-test('init defaults to the package authoring layout', async () => {
+test('init defaults to the composition-neutral package skeleton', async () => {
   const root = await makeTempRoot('skillrepo-init-package-');
   const repo = join(root, 'package-repo');
   try {
     const result = await runCli(['init', repo], root);
     assert.equal(result.code, 0, result.stderr);
-    assert.deepEqual((await readdir(repo)).sort(), ['.apm', '.gitignore', 'apm.yml'].sort());
-    assert.deepEqual((await readdir(join(repo, '.apm'))).sort(), ['agents', 'skills'].sort());
-    assert.equal(await readFile(join(repo, '.apm', 'skills', '.gitkeep'), 'utf8'), '');
-    assert.equal(await readFile(join(repo, '.apm', 'agents', '.gitkeep'), 'utf8'), '');
+    assert.deepEqual((await readdir(repo)).sort(), ['.gitignore', 'apm.yml'].sort());
+    await assert.rejects(access(join(repo, '.apm')));
+    await assert.rejects(access(join(repo, 'skills')));
+    await assert.rejects(access(join(repo, 'agents')));
     assert.equal(await readFile(join(repo, 'apm.yml'), 'utf8'), renderOpenApmManifest('package-repo'));
     assert.equal(
       await readFile(join(repo, 'apm.yml'), 'utf8'),

@@ -94,7 +94,7 @@ test('migration can add a stable name without rejecting OpenCode-compatible fron
       else process.env.OPENCODE_CONFIG = oldConfig;
     }
 
-    const moved = join(targetRoot, 'demo-repo', 'agents', 'admission-worker.md');
+    const moved = join(targetRoot, 'demo-repo', '.apm', 'agents', 'admission-worker.agent.md');
     await access(moved);
     const text = await readFile(moved, 'utf8');
     assert.match(text, /^---\nname: admission-worker\n/);

@@ -6,6 +6,15 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
 import { parseFrontmatter, stableSkillId } from './frontmatter.js';
+import {
+  APM_DIRECTORY,
+  AGENTS_DIRECTORY,
+  PROJECTION_MARKER_NAME,
+  SKILLS_DIRECTORY,
+  decideLayoutStructure,
+  validateManagedProjection,
+  type PackageLayoutStrategy,
+} from './layout.js';
 
 export type VerifyResult = { ok: boolean; command: string; stdout: string; stderr: string };
 export type RepoLayout = 'skillrepo' | 'apm';
@@ -13,7 +22,9 @@ export type AgentSource = { name: string; sourcePath: string };
 export type RepoInventory = {
   repo: string;
   layout: RepoLayout;
+  layoutStrategy: PackageLayoutStrategy;
   skillsDir?: string;
+  projectedSkillsDir?: string;
   agentsDir?: string;
   skillIds: string[];
   agentNames: string[];
@@ -500,51 +511,61 @@ export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
   const repoStat = await tryLstat(repo);
   if (!repoStat?.isDirectory() || repoStat.isSymbolicLink()) throw new Error(`Repo path is not a real directory: ${repo}`);
 
-  const candidates: Array<{ layout: RepoLayout; skills: string; agents: string; present: boolean }> = [
-    { layout: 'skillrepo', skills: join(repo, 'skills'), agents: join(repo, 'agents'), present: false },
-    { layout: 'apm', skills: join(repo, '.apm', 'skills'), agents: join(repo, '.apm', 'agents'), present: false },
-  ];
-  const apmManifest = await tryLstat(join(repo, 'apm.yml'));
-  const hasApmManifest = Boolean(apmManifest?.isFile() && !apmManifest.isSymbolicLink());
-  for (const candidate of candidates) {
-    candidate.present = Boolean(await tryLstat(candidate.skills) || await tryLstat(candidate.agents));
+  const [rootSkillsStat, rootAgentsStat, apmSkillsStat, apmAgentsStat, apmManifestStat, projectionMarkerStat] = await Promise.all([
+    tryLstat(join(repo, SKILLS_DIRECTORY)),
+    tryLstat(join(repo, AGENTS_DIRECTORY)),
+    tryLstat(join(repo, APM_DIRECTORY, SKILLS_DIRECTORY)),
+    tryLstat(join(repo, APM_DIRECTORY, AGENTS_DIRECTORY)),
+    tryLstat(join(repo, 'apm.yml')),
+    tryLstat(join(repo, SKILLS_DIRECTORY, PROJECTION_MARKER_NAME)),
+  ]);
+
+  const decision = decideLayoutStructure({
+    hasApmManifest: Boolean(apmManifestStat?.isFile() && !apmManifestStat.isSymbolicLink()),
+    hasRootSkills: Boolean(rootSkillsStat),
+    hasRootAgents: Boolean(rootAgentsStat),
+    hasApmSkills: Boolean(apmSkillsStat),
+    hasApmAgents: Boolean(apmAgentsStat),
+    hasProjectionMarker: Boolean(projectionMarkerStat),
+  });
+  if (decision.strategy === 'invalid') throw new Error(`${decision.reason}: ${repo}`);
+
+  if (decision.strategy === 'apm-canonical-with-skill-projection') {
+    const projection = await validateManagedProjection(repo);
+    if (!projection.ok) {
+      throw new Error(`Invalid managed skill projection: ${projection.issues.map(issue => issue.detail).join('; ')}: ${repo}`);
+    }
   }
 
-  const apmCandidate = candidates.find(candidate => candidate.layout === 'apm')!;
-  if (apmCandidate.present && !hasApmManifest) {
-    throw new Error(`Package layout requires a regular apm.yml manifest: ${repo}`);
-  }
-  apmCandidate.present = apmCandidate.present && hasApmManifest;
-
-  const activeLayouts = candidates.filter(candidate => candidate.present);
-  if (activeLayouts.length === 0) throw new Error(`Repo has neither skills/ nor agents/ (or .apm/skills nor .apm/agents): ${repo}`);
-  if (activeLayouts.length > 1) {
-    throw new Error(`Repo has multiple supported layouts: ${activeLayouts.map(candidate => candidate.layout).join(', ')}: ${repo}`);
-  }
-
-  const layout = activeLayouts[0]!;
-  const skills = layout.skills;
-  const agents = layout.agents;
-  const skillsStat = await tryLstat(skills);
-  const agentsStat = await tryLstat(agents);
+  // skillsDir/agentsDir are the single authoritative sources. The projected
+  // root skills tree of a mixed package is compatibility output only and is
+  // never returned as the authoritative skill source.
+  const skillsDir = decision.strategy === 'apm-root-skills' || decision.strategy === 'legacy-root'
+    ? join(repo, SKILLS_DIRECTORY)
+    : join(repo, APM_DIRECTORY, SKILLS_DIRECTORY);
+  const agentsDir = decision.strategy === 'legacy-root'
+    ? join(repo, AGENTS_DIRECTORY)
+    : join(repo, APM_DIRECTORY, AGENTS_DIRECTORY);
+  const skillsStat = await tryLstat(skillsDir);
+  const agentsStat = await tryLstat(agentsDir);
   const hasSkills = Boolean(skillsStat);
   const hasAgents = Boolean(agentsStat);
 
-  if (hasSkills && (!skillsStat!.isDirectory() || skillsStat!.isSymbolicLink())) throw new Error(`skills path is not a real directory: ${skills}`);
-  if (hasAgents && (!agentsStat!.isDirectory() || agentsStat!.isSymbolicLink())) throw new Error(`agents path is not a real directory: ${agents}`);
+  if (hasSkills && (!skillsStat!.isDirectory() || skillsStat!.isSymbolicLink())) throw new Error(`skills path is not a real directory: ${skillsDir}`);
+  if (hasAgents && (!agentsStat!.isDirectory() || agentsStat!.isSymbolicLink())) throw new Error(`agents path is not a real directory: ${agentsDir}`);
 
-  const skillIds = hasSkills ? await collectSkillIds(skills, true) : [];
+  const skillIds = hasSkills ? await collectSkillIds(skillsDir, true) : [];
   let agentNames: string[] = [];
   let agentSources: AgentSource[] = [];
   let agentIssues: string[] = [];
   if (hasAgents) {
-    if (layout.layout === 'apm') {
-      const result = await collectApmAgentSources(agents);
+    if (decision.layout === 'apm') {
+      const result = await collectApmAgentSources(agentsDir);
       agentSources = result.sources;
       agentNames = result.sources.map(source => source.name);
       agentIssues = result.issues;
     } else {
-      const result = await collectAgentNames(agents, true);
+      const result = await collectAgentNames(agentsDir, true);
       agentNames = result.names;
       agentIssues = result.issues;
     }
@@ -556,9 +577,11 @@ export async function inspectRepo(repoInput: string): Promise<RepoInventory> {
 
   return {
     repo,
-    layout: layout.layout,
-    skillsDir: hasSkills ? skills : undefined,
-    agentsDir: hasAgents ? agents : undefined,
+    layout: decision.layout,
+    layoutStrategy: decision.strategy,
+    skillsDir: hasSkills ? skillsDir : undefined,
+    projectedSkillsDir: decision.strategy === 'apm-canonical-with-skill-projection' ? join(repo, SKILLS_DIRECTORY) : undefined,
+    agentsDir: hasAgents ? agentsDir : undefined,
     skillIds,
     agentNames,
     agentSources,
