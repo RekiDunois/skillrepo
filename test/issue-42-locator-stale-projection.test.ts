@@ -61,3 +61,48 @@ test('issue #42: locator authoring fails closed when a managed projection has di
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('issue #42: locator authoring fails closed when the canonical source has diverged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skillrepo-issue-42-locator-stale-canonical-'));
+  const configDir = join(root, 'opencode');
+  const repo = join(root, 'package-repo');
+  const canonical = join(repo, '.apm', 'skills');
+  try {
+    await mkdir(join(canonical, 'stale-skill'), { recursive: true });
+    await mkdir(join(repo, '.apm', 'agents'), { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    await execFileAsync('git', ['init', '-q', repo]);
+    await writeFile(
+      join(canonical, 'stale-skill', 'SKILL.md'),
+      '---\nname: stale-skill\ndescription: canonical\n---\n',
+      'utf8',
+    );
+    await writeFile(join(repo, 'apm.yml'), 'name: package-repo\nversion: 0.1.0\n', 'utf8');
+    await stageProjection(canonical, join(repo, 'skills'));
+
+    // The projection is still pristine; the canonical .apm/skills tree moved
+    // on instead. A structurally valid marker must not paper over that drift
+    // either, so the locator keeps the dual tree blocking authoring.
+    await writeFile(
+      join(canonical, 'stale-skill', 'SKILL.md'),
+      '---\nname: stale-skill\ndescription: externally modified canonical\n---\n',
+      'utf8',
+    );
+    await writeFile(
+      join(configDir, 'opencode.jsonc'),
+      JSON.stringify({ skills: { paths: [join(repo, 'skills')] } }),
+      'utf8',
+    );
+
+    await assert.rejects(
+      () => execFileAsync(
+        process.execPath,
+        [locator, '--kind', 'skill', '--name', 'stale-skill', '--project-root', repo, '--authoring'],
+        { env: { ...process.env, OPENCODE_CONFIG_DIR: configDir }, encoding: 'utf8' },
+      ),
+      error => locatorFailure(error) && error.stderr.includes('resource is ambiguous'),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
