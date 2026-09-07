@@ -416,10 +416,11 @@ function hasPackageManifest(repoRoot) {
 
 // Classification hint for a root skills directory that claims to be a managed
 // Agent Skills projection of an APM package. The marker is never treated as a
-// validity oracle: only its well-formedness is checked here, and fail-closed
-// fingerprint validation stays in `inspectRepo()`. "unrecognized" means a
-// marker exists but cannot be trusted, so the root tree must stay an
-// authoring candidate and produce a fail-closed ambiguity.
+// validity oracle: only strict schema-v1 well-formedness (exact field set and
+// fixed ownership values) is checked here, and fail-closed fingerprint
+// validation stays in `inspectRepo()`. "unrecognized" means a marker exists
+// but cannot be trusted, so the root tree must stay an authoring candidate
+// and produce a fail-closed ambiguity.
 const PROJECTION_HINT_ABSENT = 'absent';
 const PROJECTION_HINT_MANAGED = 'managed';
 const PROJECTION_HINT_UNRECOGNIZED = 'unrecognized';
@@ -440,8 +441,23 @@ function projectionMarkerHintSync(sourceRoot) {
     return PROJECTION_HINT_UNRECOGNIZED;
   }
   if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return PROJECTION_HINT_UNRECOGNIZED;
+  // Strict schema-v1 conformance, mirroring `parseProjectionMarker()`: exactly
+  // the seven schema fields, with no unknown and no missing keys. The hint
+  // must never be looser than the shared parser.
+  const expectedKeys = new Set([
+    'schemaVersion',
+    'owner',
+    'kind',
+    'source',
+    'target',
+    'fingerprintAlgorithm',
+    'fingerprint',
+  ]);
+  const actualKeys = Object.keys(marker);
+  const exactKeys = actualKeys.length === expectedKeys.size && actualKeys.every(key => expectedKeys.has(key));
   const wellFormed =
-    marker.schemaVersion === 1
+    exactKeys
+    && marker.schemaVersion === 1
     && marker.owner === 'skillrepo'
     && marker.kind === 'agent-skills-projection'
     && marker.source === '.apm/skills'
